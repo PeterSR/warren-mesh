@@ -49,7 +49,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           # A fixed Go, so a release can be rebuilt bit for bit. Raise it with each Go patch release.
-          go-version: "1.26.10"
+          go-version: "1.26.11"
           # A release is built from a clean module and build cache.
           cache: false
       - name: the version in the code is the tag's
