@@ -1,0 +1,47 @@
+# A dev.yaml for `warren dev --config examples/dev.yaml`: two nodes in one
+# process, joined by the in-memory transport, each with real service sockets
+# in a temporary directory (or the one given with --dir). Warren prints the
+# socket paths at start. A service connects to a socket of its relay and is
+# that service there; calls and entries cross between the two nodes.
+#
+# Services are always external here: dev starts no processes, so a service
+# is started by hand (or by the program you are testing) with
+# WARREN_SERVICE_SOCKET pointing at one of the printed sockets.
+
+# fast: true shortens Warren's timers (lease grace, stale window, scans) so
+# tests need not wait. Leave it off to see the contract's real timings.
+fast: false
+
+nodes:
+  - name: laptop
+    services:                      # services on the node itself
+      - name: chat
+        allow: ["*"]               # exact relay ids, "*.<node>", or "*"; omitted means nobody
+        namespaces: [web]          # extra namespaces the service may publish under
+      - name: notes
+        allow: ["host.laptop"]     # only the flat child below may call it
+    children:
+      - name: host                 # a flat child: its entries take the node's namespace
+        flat: true
+        services:
+          - name: chat
+            allow: ["*"]
+      - name: sandbox              # a child: its entries are under sandbox.laptop
+        names: ["bot-*"]           # optional patterns for the entry names it may publish
+        max_entries: 50
+        services:
+          - name: chat
+            allow: ["*"]
+    default:                       # directories made under the attach dir while dev runs
+      max_entries: 20
+      services:
+        - name: chat
+          allow: ["*"]
+
+  - name: server
+    services:
+      - name: chat
+        allow: ["*"]
+        inflight: 8              # calls held or handed out at once (default 16)
+        per_root: 4              # of those, per calling node (default 8)
+        outflight: 8             # calls this socket may have in flight (default 16)
