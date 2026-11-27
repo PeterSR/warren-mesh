@@ -19,17 +19,19 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
 	"aead.dev/minisign"
 	"golang.org/x/term"
 
+	"github.com/PeterSR/warren-mesh/internal/fsutil"
 	"github.com/PeterSR/warren-mesh/internal/update/manifest"
 	"github.com/PeterSR/warren-mesh/internal/update/semver"
 	"github.com/PeterSR/warren-mesh/internal/update/uconfig"
@@ -199,7 +201,10 @@ func keygen(args []string, in io.Reader, out, errw io.Writer) error {
 	if err != nil {
 		return err
 	}
-	pubBytes, _ := pub.MarshalText()
+	pubBytes, err := pub.MarshalText()
+	if err != nil {
+		return err
+	}
 	if afterKey != nil {
 		afterKey(base)
 	}
@@ -216,43 +221,13 @@ func keygen(args []string, in io.Reader, out, errw io.Writer) error {
 	return nil
 }
 
-// writeNoClobber writes a file through a temporary file in the same directory
-// and links it into place, so a failed write leaves nothing behind and an
-// existing file is never replaced; the directory is synced.
+// writeNoClobber is fsutil.WriteNoClobber with the directory sync tests can replace.
 func writeNoClobber(path string, b []byte, mode os.FileMode) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".new-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if err := tmp.Chmod(mode); err != nil {
-		tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(b); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Link(tmp.Name(), path); err != nil { // fails if the file exists
-		return err
-	}
-	if err := syncDirFn(dir); err != nil {
-		os.Remove(path) // not durable: leave nothing behind
-		return err
-	}
-	return nil
+	return fsutil.WriteNoClobberSync(path, b, mode, syncDirFn)
 }
 
-// syncDirFn is syncDir; tests replace it.
-var syncDirFn = syncDir
+// syncDirFn is the directory sync of a no-clobber write; tests replace it.
+var syncDirFn = fsutil.SyncDir
 
 func loadPrivateKey(path, pwFile string, in io.Reader, errw io.Writer) (minisign.PrivateKey, error) {
 	var zero minisign.PrivateKey
@@ -328,7 +303,7 @@ func publish(args []string, in io.Reader, out, errw io.Writer) error {
 		if !fi.Mode().IsRegular() {
 			return fmt.Errorf("%s is not a regular file", sp.path)
 		}
-		sum, err := sha256File(sp.path)
+		sum, err := fsutil.SHA256File(sp.path)
 		if err != nil {
 			return err
 		}
@@ -367,7 +342,10 @@ func publish(args []string, in io.Reader, out, errw io.Writer) error {
 	}
 	sig := manifest.Sign(key, data, m)
 	// What an updater would check, before anything is written.
-	pub, _ := key.Public().(minisign.PublicKey)
+	pub, ok := key.Public().(minisign.PublicKey)
+	if !ok {
+		return errors.New("the private key has no public key of the expected type")
+	}
 	k, err := manifest.ParseKey(pub.String())
 	if err != nil {
 		return err
@@ -401,11 +379,11 @@ func publish(args []string, in io.Reader, out, errw io.Writer) error {
 	// manifest last (both by rename). A reader that catches a pointer between
 	// the two renames sees a manifest and signature that do not belong together
 	// and fails to verify; the updater looks again once.
-	for _, n := range []string{manifestFile(m.Component, "", m.Version), manifestFile(m.Component, m.Channel, "")} {
-		if err := writeAtomic(filepath.Join(*outDir, n+".minisig"), sig); err != nil {
+	for _, n := range []string{manifest.FileName(m.Component, "", m.Version), manifest.FileName(m.Component, m.Channel, "")} {
+		if err := fsutil.WriteAtomic(filepath.Join(*outDir, n+".minisig"), sig, 0o644); err != nil {
 			return err
 		}
-		if err := writeAtomic(filepath.Join(*outDir, n), data); err != nil {
+		if err := fsutil.WriteAtomic(filepath.Join(*outDir, n), data, 0o644); err != nil {
 			return err
 		}
 	}
@@ -418,7 +396,7 @@ func publish(args []string, in io.Reader, out, errw io.Writer) error {
 // publish, which only --allow-downgrade may do. The old pointer is read, not
 // trusted; one that cannot be read does not stop a publish.
 func checkPointer(outDir string, m *manifest.Manifest) error {
-	b, err := os.ReadFile(filepath.Join(outDir, manifestFile(m.Component, m.Channel, "")))
+	b, err := os.ReadFile(filepath.Join(outDir, manifest.FileName(m.Component, m.Channel, "")))
 	if err != nil {
 		return nil
 	}
@@ -430,13 +408,6 @@ func checkPointer(outDir string, m *manifest.Manifest) error {
 		return fmt.Errorf("the %s pointer in %s names %s, which is newer than %s; pass --allow-downgrade to move it back", m.Channel, outDir, old.Version, m.Version)
 	}
 	return nil
-}
-
-func manifestFile(component, channel, version string) string {
-	if version != "" {
-		return component + "-" + version + ".manifest.json"
-	}
-	return component + "." + channel + ".manifest.json"
 }
 
 // fileName is the name hint of a published file: <target>_<version>_<os>_<arch>.
@@ -471,25 +442,6 @@ func versionGuard(m *manifest.Manifest, specs []fileSpec) error {
 	return fmt.Errorf("version guard: no %s binary for the host platform %s among the --file arguments", m.Component, host)
 }
 
-func sha256File(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
-// afterKey is called after the private key is written and before the public one (tests).
-var afterKey func(base string)
-
-// beforeCopy is called after signing and before the files are copied (tests).
-var beforeCopy func()
-
 // copyVerified copies src to dst while hashing it, and refuses (leaving
 // nothing at dst) when the bytes are not the size and digest that were signed.
 func copyVerified(src, dst string, want manifest.File) error {
@@ -498,73 +450,24 @@ func copyVerified(src, dst string, want manifest.File) error {
 		return err
 	}
 	defer in.Close()
-	tmp, err := os.CreateTemp(filepath.Dir(dst), ".part-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(tmp, h), in)
-	if err != nil {
-		tmp.Close()
-		return err
-	}
-	if n != want.Size || hex.EncodeToString(h.Sum(nil)) != want.SHA256 {
-		tmp.Close()
-		return fmt.Errorf("%s changed after it was signed (%d bytes, digest %s); nothing was published", src, n, hex.EncodeToString(h.Sum(nil))[:12])
-	}
-	if err := tmp.Chmod(0o644); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp.Name(), dst); err != nil {
-		return err
-	}
-	return syncDir(filepath.Dir(dst))
+	return fsutil.WriteAtomicFunc(dst, 0o644, func(w io.Writer) error {
+		h := sha256.New()
+		n, err := io.Copy(io.MultiWriter(w, h), in)
+		if err != nil {
+			return err
+		}
+		if sum := hex.EncodeToString(h.Sum(nil)); n != want.Size || sum != want.SHA256 {
+			return fmt.Errorf("%s changed after it was signed (%d bytes, digest %s); nothing was published", src, n, sum[:12])
+		}
+		return nil
+	})
 }
 
-func writeAtomic(path string, b []byte) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".part-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(b); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(0o644); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		return err
-	}
-	return syncDir(filepath.Dir(path))
-}
+// afterKey is called after the private key is written and before the public one (tests).
+var afterKey func(base string)
 
-func syncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
-}
+// beforeCopy is called after signing and before the files are copied (tests).
+var beforeCopy func()
 
 func verify(args []string, out, errw io.Writer) error {
 	fs := flagSet("verify", errw)
@@ -629,11 +532,11 @@ func verifyOne(dir, path string, data []byte, k manifest.Key, m *manifest.Manife
 	}
 	// The file name must say what the manifest says.
 	base := filepath.Base(path)
-	if base != manifestFile(m.Component, "", m.Version) && base != manifestFile(m.Component, m.Channel, "") {
+	if base != manifest.FileName(m.Component, "", m.Version) && base != manifest.FileName(m.Component, m.Channel, "") {
 		return fmt.Errorf("the file name does not match the component %s, channel %s and version %s inside", m.Component, m.Channel, m.Version)
 	}
 	for _, p := range m.SortedPlatforms() {
-		for _, t := range sortedFileKeys(m.Platforms[p].Files) {
+		for _, t := range slices.Sorted(maps.Keys(m.Platforms[p].Files)) {
 			f := m.Platforms[p].Files[t]
 			fi, err := os.Stat(filepath.Join(dir, f.Name))
 			if err != nil {
@@ -642,7 +545,7 @@ func verifyOne(dir, path string, data []byte, k manifest.Key, m *manifest.Manife
 			if fi.Size() != f.Size {
 				return fmt.Errorf("%s %s: %d bytes, the manifest signs %d", p, t, fi.Size(), f.Size)
 			}
-			sum, err := sha256File(filepath.Join(dir, f.Name))
+			sum, err := fsutil.SHA256File(filepath.Join(dir, f.Name))
 			if err != nil {
 				return err
 			}
@@ -652,15 +555,6 @@ func verifyOne(dir, path string, data []byte, k manifest.Key, m *manifest.Manife
 		}
 	}
 	return nil
-}
-
-func sortedFileKeys(m map[string]manifest.File) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }
 
 func readPublicKey(s string) (manifest.Key, error) {

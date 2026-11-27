@@ -1,15 +1,19 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/PeterSR/warren-mesh/internal/platform"
 )
 
 // The updater's own control socket (docs/updates.md, "Running it"): HTTP over a unix socket in
@@ -100,10 +104,16 @@ func (e *Engine) Handler(reload func() error) http.Handler {
 }
 
 // Listen makes the socket at path (mode 0600) and serves h on it. Only the
-// user running the updater, or root, may connect (SO_PEERCRED, where the
-// system has it; a connection whose credentials cannot be read is refused). A socket file left by an earlier run is removed: the caller
-// holds update.lock, so it is not in use.
-func Listen(path string, h http.Handler) (*http.Server, error) {
+// user running the updater, or root, may connect: the peer's uid is read with
+// SO_PEERCRED on Linux and LOCAL_PEERCRED on darwin, and on other systems, or
+// for a connection whose credentials cannot be read, every connection is
+// refused. A socket file left by an earlier run is removed: the caller holds
+// update.lock, so it is not in use. A failure of the serving loop other
+// than its being closed is logged to log (nil: the default logger).
+func Listen(path string, h http.Handler, log *slog.Logger) (*http.Server, error) {
+	if log == nil {
+		log = slog.Default()
+	}
 	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSocket != 0 {
 		_ = os.Remove(path)
 	}
@@ -116,8 +126,20 @@ func Listen(path string, h http.Handler) (*http.Server, error) {
 		return nil, err
 	}
 	srv := &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second}
-	go func() { _ = srv.Serve(&checkedListener{Listener: ln}) }()
+	go func() {
+		if err := srv.Serve(&checkedListener{Listener: ln}); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("the updater socket stopped serving", "err", err)
+		}
+	}()
 	return srv, nil
+}
+
+// peerAllowed reports whether the process at the other end of a unix
+// connection runs as the updater's user or root. A connection whose peer
+// credentials cannot be read, on any system, is refused.
+func peerAllowed(c net.Conn) bool {
+	uid, ok := platform.ConnUID(c)
+	return ok && (uid == os.Geteuid() || uid == 0)
 }
 
 type checkedListener struct{ net.Listener }
@@ -160,7 +182,7 @@ func (c *Client) do(ctx context.Context, method, uri string, body io.Reader, siz
 		if err != nil {
 			return err
 		}
-		rd = bytesReader(b)
+		rd = bytes.NewReader(b)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, "http://updater"+uri, rd)
 	if err != nil {
@@ -176,7 +198,7 @@ func (c *Client) do(ctx context.Context, method, uri string, body io.Reader, siz
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode >= 300 {
-		return &RemoteError{Status: resp.StatusCode, Msg: string(trimNL(b))}
+		return &RemoteError{Status: resp.StatusCode, Msg: string(bytes.TrimRight(b, "\r\n"))}
 	}
 	if out != nil {
 		return json.Unmarshal(b, out)
@@ -191,13 +213,6 @@ type RemoteError struct {
 }
 
 func (e *RemoteError) Error() string { return e.Msg }
-
-func trimNL(b []byte) []byte {
-	for len(b) > 0 && (b[len(b)-1] == '\n' || b[len(b)-1] == '\r') {
-		b = b[:len(b)-1]
-	}
-	return b
-}
 
 // Status reads the status.
 func (c *Client) Status(ctx context.Context) (*NodeStatus, error) {
@@ -231,7 +246,7 @@ func (c *Client) Install(ctx context.Context, cand *Candidate, req InstallReques
 	if err := c.do(ctx, http.MethodPost, "/stage", nil, 0, StageRequest{Component: m.Component, Manifest: string(cand.Data), Signature: string(cand.Sig)}, &st); err != nil {
 		return nil, err
 	}
-	files := m.Platforms[Platform].Files
+	files := m.Platforms[HostPlatform].Files
 	for _, n := range st.Need {
 		f := files[n.Target]
 		src, err := OpenFile(cand.Dir, f.Name, f.Size, f.SHA256)

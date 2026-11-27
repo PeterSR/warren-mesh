@@ -28,9 +28,6 @@
 // Load and reload resolve everything again, so a rotated secret file takes
 // effect when the program reloads. A changed environment variable needs the
 // program restarted, since its environment is fixed at start.
-//
-// The template package logs through logrus; this package sends logrus to
-// nowhere, process wide. A program that logs with logrus itself should know.
 package confload
 
 import (
@@ -47,11 +44,8 @@ import (
 	"strings"
 
 	"github.com/compose-spec/compose-go/v2/template"
-	"github.com/sirupsen/logrus"
 	"go.yaml.in/yaml/v3"
 )
-
-func init() { logrus.SetOutput(io.Discard) }
 
 // MaxSecretFile is the most a {file: ...} secret may hold.
 const MaxSecretFile = 64 << 10
@@ -110,7 +104,7 @@ func parse(data []byte, dir string, cfg any, env func(string) (string, bool)) er
 		if errors.As(err, &te) {
 			return typeError(te, encoded, root)
 		}
-		// An error a type's UnmarshalYAML marked with Public is its own text,
+		// An error a type's UnmarshalYAML marked with MarkSafe is its own text,
 		// which names no value.
 		var pe *publicError
 		if errors.As(err, &pe) {
@@ -187,11 +181,11 @@ type publicError struct{ err error }
 func (e *publicError) Error() string { return e.err.Error() }
 func (e *publicError) Unwrap() error { return e.err }
 
-// Public marks an error returned by a type's UnmarshalYAML as one whose text
+// MarkSafe marks an error returned by a type's UnmarshalYAML as one whose text
 // is the type's own and names no value that was read (a key is not a value, a
 // secret is). Such an error is shown as it is; every other decode error is
 // replaced by the key path alone.
-func Public(err error) error {
+func MarkSafe(err error) error {
 	if err == nil {
 		return nil
 	}
@@ -698,7 +692,7 @@ func (s *Secret) UnmarshalYAML(n *yaml.Node) error {
 			return nil
 		}
 	}
-	return Public(errors.New("a secret is a string or {file: path}"))
+	return MarkSafe(errors.New("a secret is a string or {file: path}"))
 }
 
 // resolveSecrets walks cfg, reads secret files and refuses empty secrets.

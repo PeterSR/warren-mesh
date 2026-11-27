@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/PeterSR/warren-mesh/internal/apierr"
+	"github.com/PeterSR/warren-mesh/internal/grammar"
 )
 
 // maxAnswer bounds what Warren reads back from one carried request.
@@ -96,9 +97,7 @@ func (c *Client) Hello(ctx context.Context) (Hello, error) {
 
 // Peers implements Link.
 func (c *Client) Peers(ctx context.Context, since string, wait time.Duration) (PeerList, error) {
-	if wait > 25*time.Second {
-		wait = 25 * time.Second
-	}
+	wait = min(wait, grammar.MaxWait)
 	ctx, cancel := context.WithTimeout(ctx, wait+10*time.Second)
 	defer cancel()
 	q := url.Values{"since": {since}, "wait": {strconv.Itoa(int(wait / time.Second))}}

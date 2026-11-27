@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/PeterSR/warren-mesh/internal/fsutil"
 	"github.com/PeterSR/warren-mesh/internal/update/engine"
 	"github.com/PeterSR/warren-mesh/internal/update/manifest"
 	"github.com/PeterSR/warren-mesh/internal/update/uconfig"
@@ -299,7 +300,7 @@ func TestWriteNoClobberRemovesTheFileWhenTheDirectorySyncFails(t *testing.T) {
 	d := t.TempDir()
 	path := filepath.Join(d, "k.key")
 	syncDirFn = func(string) error { return os.ErrInvalid }
-	defer func() { syncDirFn = syncDir }()
+	defer func() { syncDirFn = fsutil.SyncDir }()
 	if err := writeNoClobber(path, []byte("one"), 0o600); err == nil {
 		t.Fatal("no error")
 	}

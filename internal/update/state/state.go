@@ -14,18 +14,23 @@ import (
 	"reflect"
 	"strings"
 	"time"
+
+	"github.com/PeterSR/warren-mesh/internal/fsutil"
 )
 
 // Schema is the state.json schema this code reads and writes.
 const Schema = 1
 
-// Phases: a closed set. Anything else means hands off.
+// Phase is where a component is in its life; its values are the constants
+// below, a closed set. Anything else means hands off.
+type Phase string
+
 const (
-	Installing = "installing"
-	Probation  = "probation"
-	Committed  = "committed"
-	Reverted   = "reverted"
-	Failed     = "failed"
+	Installing Phase = "installing"
+	Probation  Phase = "probation"
+	Committed  Phase = "committed"
+	Reverted   Phase = "reverted"
+	Failed     Phase = "failed"
 )
 
 // Reasons for needs_manual.
@@ -99,7 +104,7 @@ type Bad struct {
 type Record struct {
 	Schema       int         `json:"schema"`
 	Component    string      `json:"component"`
-	Phase        string      `json:"phase"`
+	Phase        Phase       `json:"phase"`
 	Installed    *Installed  `json:"installed"`
 	Prev         *Prev       `json:"prev"`
 	Request      *Request    `json:"request"`
@@ -328,8 +333,7 @@ func (s Store) Load(component string) (*Record, error) {
 	return r, nil
 }
 
-// Save writes the record atomically: a temp file in the same directory, fsync,
-// rename, then a fsync of the directory.
+// Save writes the record atomically (see fsutil.WriteAtomic).
 func (s Store) Save(r *Record) error {
 	b, err := r.Marshal()
 	if err != nil {
@@ -339,41 +343,5 @@ func (s Store) Save(r *Record) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	f, err := os.CreateTemp(dir, "state.json.*.tmp")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	ok := false
-	defer func() {
-		if !ok {
-			os.Remove(tmp)
-		}
-	}()
-	if _, err := bytes.NewReader(b).WriteTo(f); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, s.Path(r.Component)); err != nil {
-		return err
-	}
-	ok = true
-	return SyncDir(dir)
-}
-
-// SyncDir fsyncs a directory.
-func SyncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
+	return fsutil.WriteAtomic(s.Path(r.Component), b, 0o600)
 }

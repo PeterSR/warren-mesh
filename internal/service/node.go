@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -23,11 +24,11 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/PeterSR/warren-mesh/internal/apierr"
 	"github.com/PeterSR/warren-mesh/internal/config"
+	"github.com/PeterSR/warren-mesh/internal/fsutil"
 	"github.com/PeterSR/warren-mesh/internal/grammar"
 	"github.com/PeterSR/warren-mesh/internal/link"
 	"github.com/PeterSR/warren-mesh/internal/socketdir"
@@ -59,7 +60,7 @@ var (
 	// ServeInterval is the least time between leases granted on one socket.
 	ServeInterval = 1 * time.Second
 	// PutInterval is the least time between PUTs on one socket.
-	PutInterval = 1 * time.Second
+	PutInterval = grammar.MinPutInterval
 	// DrainWait is how long shutdown waits for handed-out calls to be answered.
 	DrainWait = 5 * time.Second
 	// WaitUnit is the unit of the wait parameter (whole seconds).
@@ -78,15 +79,15 @@ var (
 // Other fixed limits (docs/architecture.md, "Limits and fairness").
 const (
 	MaxCallBody      = grammar.MaxCallBody
-	MaxPutBody       = 4 << 20
-	MaxEntryData     = 3 << 10
-	MaxPutEntries    = 1000
-	MaxPutReserved   = 64
-	MaxViewPolls     = 4
+	MaxPutBody       = grammar.MaxPutBody
+	MaxEntryData     = grammar.MaxEntryData
+	MaxPutEntries    = grammar.MaxPutEntries
+	MaxPutReserved   = grammar.MaxPutReserved
+	MaxViewPolls     = grammar.MaxViewPolls
 	MaxListEntries   = 1000
 	DefaultTimeoutMs = 30000
 	MaxTimeoutMs     = 300000
-	maxWait          = 25
+	maxWait          = grammar.MaxWaitSeconds
 	callMemory       = 2 << 20 // a request and a response
 	namesFileVersion = 1
 )
@@ -662,7 +663,7 @@ func (n *Node) loadNames() {
 	n.persisted = map[string]persistedNames{}
 	data, err := os.ReadFile(n.namesPath())
 	if err != nil {
-		if !os.IsNotExist(err) {
+		if !errors.Is(err, os.ErrNotExist) {
 			n.log.Warn("cannot read names.json; starting without it", "err", err)
 		}
 		return
@@ -714,7 +715,7 @@ func (n *Node) saveNames() {
 		n.writeMu.Lock()
 		defer n.writeMu.Unlock()
 		if seq > n.written {
-			if err := writeDurably(p, data); err != nil {
+			if err := fsutil.WriteAtomic(p, data, 0o600); err != nil {
 				// Said once until a write succeeds, though the scan loop tries
 				// again every few seconds.
 				n.mu.Lock()
@@ -755,47 +756,14 @@ func (n *Node) flushNames() {
 	}
 }
 
-// writeDurably replaces the file at p with data so that after a crash it is
-// the old content or the new, never less: the temporary file is synced
-// before the rename, and the directory after it.
-func writeDurably(p string, data []byte) (err error) {
-	// The temporary file is made exclusively, with a name nobody can guess, so
-	// a link or a file put there beforehand is never followed or written.
-	f, err := os.CreateTemp(filepath.Dir(p), filepath.Base(p)+".tmp-*")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	defer func() {
-		if err != nil {
-			_ = os.Remove(tmp)
-		}
-	}()
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, p); err != nil {
-		return err
-	}
-	dir, err := os.Open(filepath.Dir(p))
-	if err != nil {
-		return err
-	}
-	defer dir.Close()
-	return dir.Sync()
-}
-
 // CheckStateDir looks at state_dir: one that group or others may write to is
 // refused (they could replace what Warren keeps in it). owner is the uid of a
 // directory that is not owned by Warren's user (to be reported), else -1.
+//
+// The policy is the daemon's, and it differs from the updater's on purpose:
+// readable by others is accepted here (the mode that matters is write), and a
+// foreign owner is reported, not refused. The updater's own state directory
+// must be private to its user (engine.PrepareStateDir).
 func CheckStateDir(dir string) (owner int, err error) {
 	fi, err := os.Stat(dir)
 	if err != nil {
@@ -807,8 +775,8 @@ func CheckStateDir(dir string) (owner int, err error) {
 	if fi.Mode().Perm()&0o022 != 0 {
 		return -1, fmt.Errorf("state_dir %s is writable by its group or by others (mode %04o); make it 0700", dir, fi.Mode().Perm())
 	}
-	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != socketdir.Euid() {
-		return int(st.Uid), nil
+	if uid, ok := fsutil.OwnerUID(fi); ok && uid != socketdir.Euid() {
+		return uid, nil
 	}
 	return -1, nil
 }
@@ -832,7 +800,7 @@ func (n *Node) checkStateDir(dir string) error {
 func removeLeftoverTemps(dir string) {
 	ents, _ := os.ReadDir(dir)
 	for _, e := range ents {
-		if strings.HasPrefix(e.Name(), "names.json.tmp") && !e.IsDir() {
+		if (strings.HasPrefix(e.Name(), ".names.json.tmp") || strings.HasPrefix(e.Name(), "names.json.tmp")) && !e.IsDir() {
 			_ = os.Remove(filepath.Join(dir, e.Name()))
 		}
 	}

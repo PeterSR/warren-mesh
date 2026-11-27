@@ -34,6 +34,10 @@
 // error table; IsRetryable and the other helpers say what a caller should do.
 // A call that was written to the socket and then lost (the context ended, the
 // connection dropped) is an *Error with the code unknown, since the service may
-// have received it. Failures before anything was sent (the socket cannot be
-// reached) are ordinary errors from the net package and safe to retry.
+// have received it; the cause, such as context.DeadlineExceeded, is the
+// error's Err, so errors.Is finds it. For that reason errors.Is and errors.As
+// on a client Error may match a call that was sent and then lost: check
+// IsMaybeDelivered before treating a context or network error as "not sent".
+// Failures before anything was sent (the socket cannot be reached) are
+// ordinary errors from the net package and safe to retry.
 package client

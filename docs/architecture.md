@@ -396,6 +396,9 @@ rules that matter for the design:
     `confload` never shows the package's own error text (it can quote the
     whole string); it writes its own message from the key path, plus the
     variable name when one is missing.
+    A type's own `UnmarshalYAML` may return an error whose text names no
+    value that was read; it marks it with `confload.MarkSafe`, and only
+    such an error is shown as it is.
   - Load and reload resolve everything again: a rotated secret file takes
     effect when the process that reads it reloads. A changed variable needs
     that process restarted, since its environment is fixed at start.

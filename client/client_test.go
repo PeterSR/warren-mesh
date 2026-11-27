@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -207,7 +208,7 @@ func TestCallErrors(t *testing.T) {
 		t.Errorf("version: %v", err)
 	}
 	e, _ := client.AsError(err)
-	if e == nil || e.Advice() != client.GiveUp || e.Status != 409 {
+	if e == nil || e.Advice() != client.AdviceGiveUp || e.Status != 409 {
 		t.Errorf("advice: %+v", e)
 	}
 }
@@ -455,6 +456,8 @@ func TestBadEntryData(t *testing.T) {
 	}
 }
 
+var _ io.Closer = (*client.Client)(nil)
+
 // A call that was written and then cut short has an unknown outcome; one that
 // could not be sent is a plain, retryable error.
 func TestCallLostAfterSendingIsUnknown(t *testing.T) {
@@ -475,6 +478,12 @@ func TestCallLostAfterSendingIsUnknown(t *testing.T) {
 	_, err = c.Call(ctx, client.CallRequest{To: "x", Method: "m", Version: 1})
 	if !client.IsCode(err, client.CodeUnknown) || !client.IsMaybeDelivered(err) || client.IsRetryable(err) {
 		t.Errorf("a call cut off after sending: %v", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("the cause of the cut is lost: %v", err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("a cancelled call matches a deadline: %v", err)
 	}
 	srv.Close()
 	// Nothing listens now: the request is not sent, so the error is plain.

@@ -102,7 +102,7 @@ func (e *Engine) observe(ctx context.Context, c *uconfig.Comp, rec *state.Record
 				rec.Request.MinStartSeq = &one
 			}
 			if rec.Deadline != nil {
-				if d, extend := e.deadlineAfterBoot(c, rec, time.Now().UTC()); extend {
+				if d, extend := e.deadlineAfterBoot(c, rec, e.now().UTC()); extend {
 					rec.Deadline = &d
 				}
 			}
@@ -186,7 +186,7 @@ func started(svc *Service, rec *state.Record) bool {
 }
 
 func (e *Engine) watchProbation(ctx context.Context, c *uconfig.Comp, rec *state.Record) error {
-	now := time.Now().UTC()
+	now := e.now().UTC()
 	svc, err := e.observe(ctx, c, rec)
 	if err != nil {
 		return err
@@ -254,7 +254,7 @@ func crashLoop(failures []time.Time) bool {
 // revert (docs/updates.md, "Revert"): its deadline is armed only once the proof holds,
 // and not healthy by then makes the component failed.
 func (e *Engine) watchRestored(ctx context.Context, c *uconfig.Comp, rec *state.Record) error {
-	now := time.Now().UTC()
+	now := e.now().UTC()
 	svc, err := e.observe(ctx, c, rec)
 	if err != nil {
 		return err

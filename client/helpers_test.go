@@ -80,7 +80,7 @@ func dial(t testing.TB, path string, opts ...client.Option) *client.Client {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(c.Close)
+	t.Cleanup(func() { _ = c.Close() })
 	return c
 }
 

@@ -81,11 +81,9 @@ func TestSettleResetsWhenTheLeaseChanges(t *testing.T) {
 	r := newRig(t)
 	mustInstall(t, r, "1.0.0-dev.1", "new binary")
 	// Keep the lease flapping faster than the settle time: never healthy.
-	end := time.Now().Add(400 * time.Millisecond)
-	for time.Now().Before(end) {
+	for end := r.clk.Now().Add(400 * time.Millisecond); r.clk.Now().Before(end); r.clk.Advance(20 * time.Millisecond) {
 		r.fw.with("myapp", func(s *Service) { s.Lease.Epoch++ })
 		r.e.Tick(context.Background())
-		time.Sleep(20 * time.Millisecond)
 	}
 	if rec := r.record(); rec.HealthySince != nil {
 		t.Fatal("healthy although the lease epoch kept changing")
@@ -190,7 +188,7 @@ func TestServiceAbsentForAReloadWindowCountsNothing(t *testing.T) {
 	r.fw.setManaged("myapp", false)
 	for i := 0; i < 5; i++ {
 		r.e.Tick(context.Background())
-		time.Sleep(10 * time.Millisecond)
+		r.clk.Advance(pollStep)
 	}
 	rec := r.record()
 	if rec.Phase != state.Probation || len(rec.Failures) != 0 || rec.HealthySince != nil {
@@ -223,11 +221,7 @@ func TestRestoredRestartPendingIsNotFailed(t *testing.T) {
 	r.fw.refuseRestart = true
 	r.fw.mu.Unlock()
 	r.until("reverted", phaseIs(state.Reverted))
-	end := time.Now().Add(700 * time.Millisecond)
-	for time.Now().Before(end) {
-		r.e.Tick(context.Background())
-		time.Sleep(10 * time.Millisecond)
-	}
+	r.ticksFor(700*time.Millisecond, nil)
 	rec := r.record()
 	if rec.Phase != state.Reverted || rec.Request == nil || rec.Request.MinStartSeq != nil || rec.Deadline != nil {
 		t.Fatalf("a restored watch with a pending restart must not run a deadline: %+v", rec)
@@ -249,7 +243,7 @@ func TestNewBootRecomputesTheDeadlineAndBaseline(t *testing.T) {
 	r.e = r.engine(nil)
 	mustInstall(t, r, "1.0.0-dev.1", "new binary")
 	first := *r.record().Deadline
-	time.Sleep(200 * time.Millisecond)
+	r.clk.Advance(200 * time.Millisecond)
 	// Warren restarted: a new boot, counters start over, the service runs the new file from start 1.
 	r.fw.mu.Lock()
 	r.fw.boot = "boot-2"
@@ -263,8 +257,8 @@ func TestNewBootRecomputesTheDeadlineAndBaseline(t *testing.T) {
 	}
 	// The install is young, so the deadline is one settle window plus the health
 	// timeout from the new boot.
-	if want := time.Now().Add(r.comp.Settle + r.cfg.HealthTimeout); rec.Deadline.After(want.Add(time.Second)) || rec.Deadline.Before(want.Add(-time.Second)) {
-		t.Errorf("deadline %v, want about %v", rec.Deadline, want)
+	if want := r.clk.Now().Add(r.comp.Settle + r.cfg.HealthTimeout).UTC(); !rec.Deadline.Equal(want) {
+		t.Errorf("deadline %v, want %v", rec.Deadline, want)
 	}
 	r.until("healthy on the new boot", func(rec *state.Record) bool { return rec.HealthySince != nil })
 }
@@ -508,7 +502,7 @@ func TestMultipleTargetsSwapTogetherAndRevertTogether(t *testing.T) {
 		for t, c := range map[string]string{"myapp": "myapp " + version, "helper": "helper " + version} {
 			files[t] = manifest.File{Name: t + "_" + version, Size: int64(len(c)), SHA256: sha256hex([]byte(c))}
 		}
-		data, sig, _ := r.publish(version, "x", func(m *manifest.Manifest) { m.Platforms = map[string]manifest.Platform{Platform: {Files: files}} })
+		data, sig, _ := r.publish(version, "x", func(m *manifest.Manifest) { m.Platforms = map[string]manifest.Platform{HostPlatform: {Files: files}} })
 		res, err := r.e.Stage("myapp", data, sig)
 		if err != nil {
 			t.Fatal(err)
@@ -555,10 +549,15 @@ func TestStageRefusals(t *testing.T) {
 		t.Error("an unconfigured component was staged")
 	}
 	d2, s2, _ := r.publish("1.0.0-dev.2", "x", func(m *manifest.Manifest) {
-		m.Platforms = map[string]manifest.Platform{"plan9/mips": m.Platforms[Platform]}
+		m.Platforms = map[string]manifest.Platform{"plan9/mips": m.Platforms[HostPlatform]}
 	})
 	_, err := r.e.Stage("myapp", d2, s2)
 	refused(t, err, "no build for")
+	// An engine told it runs on that platform accepts it.
+	plan9 := New(Options{Config: r.cfg, Log: quiet(), Platform: "plan9/mips"})
+	if _, err := plan9.Stage("myapp", d2, s2); err != nil {
+		t.Errorf("a manifest for the engine's own platform: %v", err)
+	}
 
 	res, err := r.e.Stage("myapp", data, sig)
 	if err != nil || len(res.Need) != 1 {

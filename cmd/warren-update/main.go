@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/PeterSR/warren-mesh/internal/update/engine"
+	"github.com/PeterSR/warren-mesh/internal/update/state"
 	"github.com/PeterSR/warren-mesh/internal/update/uconfig"
 	"github.com/PeterSR/warren-mesh/internal/version"
 )
@@ -230,7 +231,9 @@ func cmdInstall(cfgPath, name string, from []string, ver string, req engine.Inst
 	if req.DryRun || !wait {
 		return 0
 	}
-	return waitFor(cl, name, out)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return waitFor(ctx, cl, name, out)
 }
 
 // fileSource turns --from file://DIR into a directory; a relative path is
@@ -252,11 +255,12 @@ func fileSource(from string) (string, error) {
 }
 
 // waitFor blocks until the component is healthy or committed (0), or reverted
-// or failed (1).
-func waitFor(cl *engine.Client, name string, out io.Writer) int {
-	var last string
+// or failed (1). It also stops (1) when ctx ends, which is when the user
+// interrupts the command: the install itself carries on in the updater.
+func waitFor(ctx context.Context, cl *engine.Client, name string, out io.Writer) int {
+	var last state.Phase
 	for {
-		st, err := cl.Status(context.Background())
+		st, err := cl.Status(ctx)
 		if err == nil {
 			for _, c := range st.Components {
 				if c.Name != name {
@@ -267,18 +271,23 @@ func waitFor(cl *engine.Client, name string, out io.Writer) int {
 					last = c.Phase
 				}
 				switch {
-				case c.Phase == "reverted" || c.Phase == "failed":
+				case c.Phase == state.Reverted || c.Phase == state.Failed:
 					if c.LastError != "" {
 						fmt.Fprintf(out, "%s: %s\n", name, c.LastError)
 					}
 					return 1
-				case c.Phase == "committed", c.HealthySince != nil:
+				case c.Phase == state.Committed, c.HealthySince != nil:
 					fmt.Fprintf(out, "%s: healthy\n", name)
 					return 0
 				}
 			}
 		}
-		time.Sleep(time.Second)
+		select {
+		case <-ctx.Done():
+			fmt.Fprintf(out, "%s: stopped waiting; the install carries on in the updater\n", name)
+			return 1
+		case <-time.After(time.Second):
+		}
 	}
 }
 

@@ -19,8 +19,6 @@ const (
 	MaxServiceName = 32
 	MaxEntryName   = 64
 	MaxDetail      = 200
-	// MaxCallBody is the most one call's request or response may carry.
-	MaxCallBody = 1 << 20
 )
 
 // Label reports whether s is a label: [a-z0-9][a-z0-9_-]{0,62}.

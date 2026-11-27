@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"maps"
 	"os"
 	"time"
 
@@ -68,7 +69,7 @@ func (e *Engine) recoverOne(ctx context.Context, c *uconfig.Comp) error {
 	}
 	// Drift, only for a settled record whose files are meant to be on disk.
 	if terr == nil && rec.Installed != nil && len(rec.Installed.Files) > 0 && (rec.Phase == state.Committed || (rec.Phase == state.Reverted && !rec.UnfinishedRevert())) && rec.NeedsManual == "" {
-		if cur, err := hashTargets(targets); err == nil && !sameFiles(cur, rec.Installed.Files) {
+		if cur, err := hashTargets(targets); err == nil && !maps.Equal(cur, rec.Installed.Files) {
 			rec.NeedsManual = state.Drift
 			e.log.Warn("a binary was replaced by hand; the component needs one manual install", "component", c.Name)
 			if err := e.save(rec); err != nil {
@@ -116,11 +117,11 @@ func (e *Engine) settleInterrupted(ctx context.Context, c *uconfig.Comp, rec *st
 func (e *Engine) warnEvery(key, msg string, args ...any) {
 	e.mu.Lock()
 	last, seen := e.warned[key]
-	if seen && time.Since(last) < time.Minute {
+	if seen && e.now().Sub(last) < time.Minute {
 		e.mu.Unlock()
 		return
 	}
-	e.warned[key] = time.Now()
+	e.warned[key] = e.now()
 	e.mu.Unlock()
 	e.log.Warn(msg, args...)
 }
@@ -130,5 +131,5 @@ var StagingMaxAge = 24 * time.Hour
 
 // CleanOldStaging removes staging left by a crashed upload.
 func (e *Engine) CleanOldStaging() {
-	e.CleanStaging(func(fi os.FileInfo) bool { return time.Since(fi.ModTime()) > StagingMaxAge })
+	e.CleanStaging(func(fi os.FileInfo) bool { return e.now().Sub(fi.ModTime()) > StagingMaxAge })
 }

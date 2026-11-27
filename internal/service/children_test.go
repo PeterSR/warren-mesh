@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"github.com/PeterSR/warren-mesh/internal/link"
 	"log/slog"
 	"net"
 	"net/http"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/PeterSR/warren-mesh/internal/apierr"
+	"github.com/PeterSR/warren-mesh/internal/link"
 	"github.com/PeterSR/warren-mesh/internal/socketdir"
 )
 

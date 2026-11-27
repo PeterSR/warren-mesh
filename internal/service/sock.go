@@ -91,12 +91,7 @@ func (s *sock) mayPublishIn(ns string) bool {
 	if ns == s.entryNS() {
 		return true
 	}
-	for _, x := range s.namespaces() {
-		if x == ns {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(s.namespaces(), ns)
 }
 
 // ---- reconciling sockets with config and directories ----

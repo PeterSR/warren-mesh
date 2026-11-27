@@ -80,6 +80,17 @@ func ValidTarget(s string) bool { return targetRe.MatchString(s) }
 // ValidName reports whether s is a file name hint.
 func ValidName(s string) bool { return nameRe.MatchString(s) }
 
+// FileName is the file name of a manifest in a release directory: the exact
+// release <component>-<version>.manifest.json when version is not empty, else
+// the pointer of a channel, <component>.<channel>.manifest.json. The signature
+// sits next to it with ".minisig" added.
+func FileName(component, channel, version string) string {
+	if version != "" {
+		return component + "-" + version + ".manifest.json"
+	}
+	return component + "." + channel + ".manifest.json"
+}
+
 // Parse reads a manifest strictly: at most 16 KiB of UTF-8 JSON, one object,
 // no unknown fields, no duplicate-looking tricks (a second value is refused).
 // It does not check the values; see Check.

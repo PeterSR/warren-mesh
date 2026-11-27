@@ -2,11 +2,12 @@ package config
 
 import (
 	"fmt"
-	"github.com/PeterSR/warren-mesh/internal/pinned"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/PeterSR/warren-mesh/internal/pinned"
 )
 
 const sample = `

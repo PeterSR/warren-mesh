@@ -10,17 +10,18 @@ package uconfig
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"go.yaml.in/yaml/v3"
 
 	"github.com/PeterSR/warren-mesh/confload"
+	"github.com/PeterSR/warren-mesh/internal/fsutil"
 	"github.com/PeterSR/warren-mesh/internal/pinned"
 	"github.com/PeterSR/warren-mesh/internal/update/manifest"
 )
@@ -132,12 +133,7 @@ func (c *Config) CanaryFor(comp *Comp) time.Duration {
 
 // Names are the component names in order.
 func (c *Config) Names() []string {
-	out := make([]string, 0, len(c.Components))
-	for n := range c.Components {
-		out = append(out, n)
-	}
-	sort.Strings(out)
-	return out
+	return slices.Sorted(maps.Keys(c.Components))
 }
 
 // Load reads and checks the file at path, as the daemon does: target
@@ -155,7 +151,7 @@ func LoadCLI(path string) (*Config, error) { return load(path, -1) }
 func load(path string, uid int) (*Config, error) {
 	var f File
 	if err := confload.Load(path, &f); err != nil {
-		return nil, confload.Public(err)
+		return nil, confload.MarkSafe(err)
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -186,23 +182,14 @@ func check(f *File, uid int) (*Config, error) {
 	if c.HealthTimeout < MinHealthTimeout || c.HealthTimeout > MaxHealthTimeout {
 		return nil, fmt.Errorf("health_timeout must be between %v and %v", MinHealthTimeout, MaxHealthTimeout)
 	}
-	names := make([]string, 0, len(f.Components))
-	for n := range f.Components {
-		names = append(names, n)
-	}
-	sort.Strings(names)
+	names := slices.Sorted(maps.Keys(f.Components))
 	seen := map[string]string{} // resolved target path -> "component target"
 	for _, name := range names {
 		comp, err := checkComponent(name, f.Components[name], c.StateDir, uid)
 		if err != nil {
 			return nil, fmt.Errorf("components.%s: %w", name, err)
 		}
-		tnames := make([]string, 0, len(comp.Targets))
-		for t := range comp.Targets {
-			tnames = append(tnames, t)
-		}
-		sort.Strings(tnames)
-		for _, t := range tnames {
+		for _, t := range slices.Sorted(maps.Keys(comp.Targets)) {
 			key := resolvedKey(comp.Targets[t])
 			if other, dup := seen[key]; dup {
 				return nil, fmt.Errorf("components.%s.targets.%s: the same file as %s", name, t, other)
@@ -386,7 +373,7 @@ func CheckTargetPath(p string, uid int) error {
 		if !fi.Mode().IsRegular() {
 			return errors.New("must be a regular file")
 		}
-	} else if !os.IsNotExist(err) {
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	dir := filepath.Dir(p)
@@ -400,7 +387,7 @@ func CheckTargetPath(p string, uid int) error {
 	if uid < 0 {
 		return nil // the daemon's rules, not checked here
 	}
-	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != uid {
+	if owner, ok := fsutil.OwnerUID(fi); ok && owner != uid {
 		return fmt.Errorf("directory %s is not owned by the user running the updater", dir)
 	}
 	if fi.Mode().Perm()&0o022 != 0 {

@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -73,13 +74,8 @@ func TestNewBootDuringAnInstallKeepsMinStartSeq(t *testing.T) {
 	if rec.Request == nil || rec.Request.MinStartSeq == nil || *rec.Request.MinStartSeq != 2 || rec.Watch.Boot != "boot-2" {
 		t.Fatalf("request %+v watch %+v", rec.Request, rec.Watch)
 	}
-	end := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(end) {
-		r.e.Tick(context.Background())
-		if r.record().HealthySince != nil {
-			t.Fatal("the process that never restarted was judged healthy as the new version")
-		}
-		time.Sleep(10 * time.Millisecond)
+	if r.ticksFor(500*time.Millisecond, func() bool { return r.record().HealthySince != nil }) {
+		t.Fatal("the process that never restarted was judged healthy as the new version")
 	}
 	r.until("reverted at the deadline", phaseIs(state.Reverted))
 }
@@ -102,11 +98,7 @@ func TestNewBootBeforeARevertRestartKeepsMinStartSeq(t *testing.T) {
 	}
 	r.e.Tick(context.Background())
 	r.fw.setRefuse(false)
-	end := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(end) {
-		r.e.Tick(context.Background())
-		time.Sleep(10 * time.Millisecond)
-	}
+	r.ticksFor(500*time.Millisecond, nil)
 	rec := r.record()
 	if rec.HealthySince != nil || rec.Request.MinStartSeq == nil || *rec.Request.MinStartSeq != 2 {
 		t.Fatalf("the bad binary's process was judged as the restored version: %+v %+v", rec.HealthySince, rec.Request)
@@ -139,7 +131,7 @@ func TestDeadlinesAreNeverArmedInThePast(t *testing.T) {
 	r := newRig(t)
 	r.cfg.HealthTimeout = time.Second
 	r.e = r.engine(nil)
-	long := time.Now().Add(-time.Hour).UTC()
+	long := r.clk.Now().Add(-time.Hour).UTC()
 	old := sha256hex([]byte("old binary"))
 	// A restored watch whose request is an hour old: the proof arms a fresh deadline.
 	one := 2
@@ -150,7 +142,7 @@ func TestDeadlinesAreNeverArmedInThePast(t *testing.T) {
 	rec.Watch = state.Watch{Boot: "boot-1"}
 	r.store().Save(rec)
 	r.fw.with("myapp", func(s *Service) { s.StartSeq = 2 })
-	before := time.Now()
+	before := r.clk.Now()
 	r.e.Tick(context.Background())
 	got := r.record()
 	if got.Deadline == nil || got.Deadline.Before(before.Add(r.comp.Settle+r.cfg.HealthTimeout-50*time.Millisecond)) {
@@ -161,7 +153,7 @@ func TestDeadlinesAreNeverArmedInThePast(t *testing.T) {
 	}
 	// After a new boot: an install younger than three timeouts gets a whole
 	// window from now; an older one is left alone.
-	now := time.Now().UTC()
+	now := r.clk.Now().UTC()
 	young := state.New("myapp")
 	young.Phase = state.Probation
 	young.Installed = &state.Installed{InstalledAt: now.Add(-r.cfg.HealthTimeout)}
@@ -237,9 +229,9 @@ func (r *rig) installOther(name, version, content string, mods ...func(*InstallR
 	r.t.Helper()
 	data, sig, _ := r.publish(version, content, func(m *manifest.Manifest) {
 		m.Component = name
-		f := m.Platforms[Platform].Files["myapp"]
+		f := m.Platforms[HostPlatform].Files["myapp"]
 		f.Name = name + "_" + version
-		m.Platforms[Platform] = manifest.Platform{Files: map[string]manifest.File{name: f}}
+		m.Platforms[HostPlatform] = manifest.Platform{Files: map[string]manifest.File{name: f}}
 	})
 	res, err := r.e.Stage(name, data, sig)
 	if err != nil {
@@ -436,7 +428,7 @@ func TestAbortAfterTheSwapBeganRestartsTheService(t *testing.T) {
 	for t, c := range map[string]string{"myapp": "myapp 1", "helper": "helper 1"} {
 		files[t] = manifest.File{Name: t + "_1", Size: int64(len(c)), SHA256: sha256hex([]byte(c))}
 	}
-	data, sig, _ := r.publish("1.0.0-dev.1", "x", func(m *manifest.Manifest) { m.Platforms = map[string]manifest.Platform{Platform: {Files: files}} })
+	data, sig, _ := r.publish("1.0.0-dev.1", "x", func(m *manifest.Manifest) { m.Platforms = map[string]manifest.Platform{HostPlatform: {Files: files}} })
 	res, err := r.e.Stage("myapp", data, sig)
 	if err != nil {
 		t.Fatal(err)
@@ -540,6 +532,9 @@ func TestPeerAllowedRefusesWhatItCannotRead(t *testing.T) {
 	if peerAllowed(a) {
 		t.Error("a connection with unreadable credentials was allowed")
 	}
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("peer credentials are only read on Linux and darwin; every connection is refused here")
+	}
 	path := filepath.Join(t.TempDir(), "s")
 	ln, err := net.Listen("unix", path)
 	if err != nil {
@@ -570,25 +565,25 @@ func TestLoadFromDirLooksAgainAtAMismatchedPair(t *testing.T) {
 	dir := t.TempDir()
 	_, s1, _ := r.publish("1.0.0-dev.1", "one")
 	d2, s2, _ := r.publish("1.0.0-dev.2", "two")
-	name := filepath.Join(dir, ManifestName("myapp", "dev", ""))
+	name := filepath.Join(dir, manifest.FileName("myapp", "dev", ""))
 	os.WriteFile(name, d2, 0o644)
 	os.WriteFile(name+".minisig", s1, 0o644) // the new manifest with the old signature
-	old := Wait
-	defer func() { Wait = old }()
 	waits := 0
-	Wait = func(time.Duration) { // the writer finishes its second rename here
+	var wait func(time.Duration)
+	e := New(Options{Config: r.cfg, Log: quiet(), Wait: func(d time.Duration) { wait(d) }})
+	wait = func(time.Duration) { // the writer finishes its second rename here
 		waits++
 		os.WriteFile(name+".minisig", s2, 0o644)
 	}
-	cand, err := LoadFromDir(dir, r.comp, "")
+	cand, err := e.LoadFromDir(dir, r.comp, "")
 	if err != nil || cand.Manifest.Version != "1.0.0-dev.2" || waits != 1 {
 		t.Fatalf("%v (waited %d times)", err, waits)
 	}
 	// A pair that stays wrong is still refused, after one look again.
 	os.WriteFile(name+".minisig", s1, 0o644)
 	waits = 0
-	Wait = func(time.Duration) { waits++ }
-	if _, err := LoadFromDir(dir, r.comp, ""); err == nil || waits != 1 {
+	wait = func(time.Duration) { waits++ }
+	if _, err := e.LoadFromDir(dir, r.comp, ""); err == nil || waits != 1 {
 		t.Errorf("a mismatched pair: %v (waited %d times)", err, waits)
 	}
 }
@@ -606,17 +601,15 @@ func TestATornDevPointerRetriesBeforeFallingBack(t *testing.T) {
 	_, oldSig, _ := r.publish("1.9.0-dev.1", "older")
 	// The stable pointer: a release signed by the stable key.
 	m := &manifest.Manifest{Format: manifest.Format, Component: "myapp", Version: "1.0.0", Channel: manifest.Stable, Created: "2026-11-26T10:00:00Z",
-		Platforms: map[string]manifest.Platform{Platform: {Files: map[string]manifest.File{"myapp": {Name: "myapp_1", Size: 1, SHA256: sha256hex([]byte("x"))}}}}}
+		Platforms: map[string]manifest.Platform{HostPlatform: {Files: map[string]manifest.File{"myapp": {Name: "myapp_1", Size: 1, SHA256: sha256hex([]byte("x"))}}}}}
 	sd, _ := m.Marshal()
-	os.WriteFile(filepath.Join(dir, ManifestName("myapp", "stable", "")), sd, 0o644)
-	os.WriteFile(filepath.Join(dir, ManifestName("myapp", "stable", ""))+".minisig", manifest.Sign(stableKey.priv, sd, m), 0o644)
-	devName := filepath.Join(dir, ManifestName("myapp", "dev", ""))
+	os.WriteFile(filepath.Join(dir, manifest.FileName("myapp", "stable", "")), sd, 0o644)
+	os.WriteFile(filepath.Join(dir, manifest.FileName("myapp", "stable", ""))+".minisig", manifest.Sign(stableKey.priv, sd, m), 0o644)
+	devName := filepath.Join(dir, manifest.FileName("myapp", "dev", ""))
 	os.WriteFile(devName, dev, 0o644)
 	os.WriteFile(devName+".minisig", oldSig, 0o644) // torn
-	old := Wait
-	defer func() { Wait = old }()
-	Wait = func(time.Duration) { os.WriteFile(devName+".minisig", devSig, 0o644) }
-	cand, err := LoadFromDir(dir, r.comp, "")
+	e := New(Options{Config: r.cfg, Log: quiet(), Wait: func(time.Duration) { os.WriteFile(devName+".minisig", devSig, 0o644) }})
+	cand, err := e.LoadFromDir(dir, r.comp, "")
 	if err != nil || cand.Manifest.Version != "2.0.0-dev.1" {
 		t.Fatalf("%v %+v", err, cand)
 	}
@@ -627,13 +620,13 @@ func TestATornDevPointerRetriesBeforeFallingBack(t *testing.T) {
 // and for a restored version. (The settle clock starts at the poll that sees
 // the new boot, so the deadline needs a settle window plus the health timeout.)
 func TestAWatchAfterALateNewBootRunsThroughToItsResult(t *testing.T) {
-	// Late, but within three health timeouts (1 s each here) of the anchor.
-	long := time.Now().Add(-2 * time.Second).UTC()
 	one := 2
-	for _, phase := range []string{state.Probation, state.Reverted} {
+	for _, phase := range []state.Phase{state.Probation, state.Reverted} {
 		r := newRig(t)
 		r.cfg.HealthTimeout = time.Second
 		r.e = r.engine(nil)
+		// Late, but within three health timeouts (1 s each here) of the anchor.
+		long := r.clk.Now().Add(-2 * time.Second).UTC()
 		rec := state.New("myapp")
 		rec.Phase = phase
 		rec.Installed = &state.Installed{Version: "1.0.0", Files: map[string]string{"myapp": sha256hex([]byte("old binary"))}, InstalledAt: long}
@@ -645,7 +638,7 @@ func TestAWatchAfterALateNewBootRunsThroughToItsResult(t *testing.T) {
 		}
 		r.store().Save(rec)
 		r.fw.newBoot("boot-2")
-		r.until(phase+": healthy", func(rec *state.Record) bool { return rec.HealthySince != nil })
+		r.until(string(phase)+": healthy", func(rec *state.Record) bool { return rec.HealthySince != nil })
 		if got := r.record(); got.Phase == state.Failed || (phase == state.Probation && got.Phase != state.Probation && got.Phase != state.Committed) {
 			t.Errorf("%s: ended as %s (%s)", phase, got.Phase, got.LastError)
 		}
@@ -815,19 +808,14 @@ func TestARevertToAnUnknownVersionKeepsTheDowngradeFloor(t *testing.T) {
 // taking its lease, until the record shows the result or the time is up.
 func (r *rig) bootsUntil(t *testing.T, what string, within time.Duration, cond func(*state.Record) bool) time.Duration {
 	t.Helper()
-	start := time.Now()
+	start := r.clk.Now()
 	for n := 1; ; n++ {
 		r.fw.newBoot("boot-" + strconv.Itoa(n+1))
 		r.fw.with("myapp", func(s *Service) { s.Lease.Held = false })
-		end := time.Now().Add(100 * time.Millisecond)
-		for time.Now().Before(end) {
-			r.e.Tick(context.Background())
-			if cond(r.record()) {
-				return time.Since(start)
-			}
-			time.Sleep(10 * time.Millisecond)
+		if r.ticksFor(100*time.Millisecond, func() bool { return cond(r.record()) }) {
+			return r.clk.Now().Sub(start)
 		}
-		if time.Since(start) > within {
+		if r.clk.Now().Sub(start) > within {
 			rec := r.record()
 			t.Fatalf("%s: not reached in %v (phase %s, deadline %v)", what, within, rec.Phase, rec.Deadline)
 		}
@@ -855,7 +843,7 @@ func TestRepeatedBootsEndARestoredWatch(t *testing.T) {
 	r.cfg.HealthTimeout = 400 * time.Millisecond
 	r.e = r.engine(nil)
 	two := 2
-	now := time.Now().UTC()
+	now := r.clk.Now().UTC()
 	rec := state.New("myapp")
 	rec.Phase = state.Reverted
 	rec.Installed = &state.Installed{Version: "0.9.0", Files: map[string]string{"myapp": sha256hex([]byte("old binary"))}, InstalledAt: now}
@@ -1062,20 +1050,20 @@ func TestARestoredWatchIsBoundedFromTheProofNotTheRequest(t *testing.T) {
 	two := 2
 	rec := state.New("myapp")
 	rec.Phase = state.Reverted
-	rec.Installed = &state.Installed{Version: "0.9.0", Files: map[string]string{"myapp": sha256hex([]byte("old binary"))}, InstalledAt: time.Now().Add(-time.Hour)}
-	rec.Request = &state.Request{At: time.Now().Add(-10 * time.Second).UTC(), MinStartSeq: &two} // accepted long ago
+	rec.Installed = &state.Installed{Version: "0.9.0", Files: map[string]string{"myapp": sha256hex([]byte("old binary"))}, InstalledAt: r.clk.Now().Add(-time.Hour)}
+	rec.Request = &state.Request{At: r.clk.Now().Add(-10 * time.Second).UTC(), MinStartSeq: &two} // accepted long ago
 	rec.Watch = state.Watch{Boot: "boot-1"}
 	r.store().Save(rec)
 	// The service runs the restored file but has no lease yet: the proof holds, it does not settle.
 	r.fw.with("myapp", func(s *Service) { s.StartSeq = 2; s.Lease.Held = false })
 	r.e.Tick(context.Background())
-	proof := time.Now()
+	proof := r.clk.Now()
 	armed := r.record()
 	if armed.Deadline == nil || armed.Request.At.Before(proof.Add(-time.Second)) {
 		t.Fatalf("the proof did not arm the deadline and the anchor: %+v %+v", armed.Deadline, armed.Request)
 	}
 	// Warren restarts just before the deadline would pass.
-	time.Sleep(1050 * time.Millisecond)
+	r.clk.Advance(1050 * time.Millisecond)
 	r.fw.newBoot("boot-2")
 	r.until("healthy", func(rec *state.Record) bool { return rec.HealthySince != nil || rec.Phase == state.Failed })
 	if got := r.record(); got.Phase != state.Reverted || got.HealthySince == nil {

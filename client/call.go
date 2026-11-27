@@ -77,7 +77,7 @@ func (c *Client) Call(ctx context.Context, r CallRequest) ([]byte, error) {
 			// The call was written and then the context ended or the
 			// connection dropped: the service may have received it, so the
 			// outcome is unknown, as for the server's own `unknown`.
-			return nil, &Error{Code: CodeUnknown, Detail: "the call was sent and its outcome is lost: " + err.Error()}
+			return nil, &Error{Code: CodeUnknown, Detail: "the call was sent and its outcome is lost: " + err.Error(), Err: err}
 		}
 		return nil, err
 	}

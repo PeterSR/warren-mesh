@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"flag"
 	"os"
@@ -98,7 +99,7 @@ components:
 			return err
 		}
 		return e.Reload(next)
-	}))
+	}), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,5 +251,17 @@ components:
 	os.Chmod(filepath.Join(d, "bin"), 0o775)
 	if c, _, errs := do("revert", "--offline", "myapp", "--config", p); c != 1 || !strings.Contains(errs, "writable by group") {
 		t.Errorf("a group-writable target directory: %d %s", c, errs)
+	}
+}
+
+// waiting for an install ends when the user interrupts, even if the updater
+// does not answer.
+func TestWaitForStopsWhenInterrupted(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var out bytes.Buffer
+	cl := engine.NewClient(filepath.Join(t.TempDir(), "none.sock"))
+	if code := waitFor(ctx, cl, "myapp", &out); code != 1 || !strings.Contains(out.String(), "stopped waiting") {
+		t.Errorf("%d %q", code, out.String())
 	}
 }

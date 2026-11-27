@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/PeterSR/warren-mesh/internal/apierr"
+	"github.com/PeterSR/warren-mesh/internal/grammar"
 	"github.com/PeterSR/warren-mesh/internal/link"
 	"github.com/PeterSR/warren-mesh/internal/socketdir"
 	"github.com/PeterSR/warren-mesh/internal/version"
@@ -101,7 +102,7 @@ const (
 	MaxBody = 5 << 20
 	// maxAnswer bounds what is read back from a peer.
 	maxAnswer = 8 << 20
-	maxWait   = 25
+	maxWait   = grammar.MaxWaitSeconds
 	// callMargin is the room above Warren's own timeouts that a peer's
 	// deadline may have (the same as Warren's PeerAnswerMargin).
 	callMargin = 10 * time.Second

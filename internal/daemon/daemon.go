@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/PeterSR/warren-mesh/internal/config"
+	"github.com/PeterSR/warren-mesh/internal/fsutil"
 	"github.com/PeterSR/warren-mesh/internal/link"
 	"github.com/PeterSR/warren-mesh/internal/platform"
 	"github.com/PeterSR/warren-mesh/internal/service"
@@ -179,9 +180,9 @@ func (d *Daemon) lockState(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("state_dir lock: %w", err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := fsutil.TryLock(f); err != nil {
 		f.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) {
+		if errors.Is(err, fsutil.ErrLocked) {
 			return fmt.Errorf("another Warren already runs on this state_dir (%s is locked); two Warrens on one config would fight over every socket", p)
 		}
 		return fmt.Errorf("state_dir lock: %w", err)
@@ -680,7 +681,10 @@ func (d *Daemon) controlHandler() http.Handler {
 // Control calls the control socket at path.
 func Control(path, method, uri string) ([]byte, error) {
 	c := &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{DialContext: unixDialer(path), DisableKeepAlives: true}}
-	req, _ := http.NewRequest(method, "http://warren"+uri, nil)
+	req, err := http.NewRequest(method, "http://warren"+uri, nil)
+	if err != nil {
+		return nil, err
+	}
 	resp, err := c.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("cannot reach Warren at %s: %w", path, err)

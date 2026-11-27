@@ -11,32 +11,6 @@ import (
 	"testing"
 )
 
-// names.json is written through a temporary file that is made exclusively:
-// a link at the old, predictable name is not followed.
-func TestDurableWriteIgnoresALinkAtTheOldTemporaryName(t *testing.T) {
-	dir := t.TempDir()
-	victim := filepath.Join(dir, "victim")
-	p := filepath.Join(dir, "names.json")
-	if err := os.WriteFile(victim, []byte("precious"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(victim, p+".tmp"); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeDurably(p, []byte("replacement")); err != nil {
-		t.Fatal(err)
-	}
-	if b, _ := os.ReadFile(victim); string(b) != "precious" {
-		t.Errorf("the file behind the link was written: %q", b)
-	}
-	if b, _ := os.ReadFile(p); string(b) != "replacement" {
-		t.Errorf("names.json is %q", b)
-	}
-	if ents, _ := os.ReadDir(dir); len(ents) != 3 {
-		t.Errorf("a temporary file was left behind: %v", ents)
-	}
-}
-
 // A state_dir that group or others may write to is refused at start.
 func TestStateDirOthersMayWriteIsRefused(t *testing.T) {
 	quick(t)
@@ -72,7 +46,7 @@ func TestLeftoverNamesTempFilesAreRemovedAtStart(t *testing.T) {
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for _, f := range []string{"names.json.tmp", "names.json.tmp-123"} {
+	for _, f := range []string{"names.json.tmp", "names.json.tmp-123", ".names.json.tmp-456"} {
 		if err := os.WriteFile(filepath.Join(cfg.StateDir, f), []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -87,7 +61,7 @@ func TestLeftoverNamesTempFilesAreRemovedAtStart(t *testing.T) {
 	defer n.Close()
 	// Check the planted names only: a running node writes names.json through
 	// temporary files of its own.
-	for _, f := range []string{"names.json.tmp", "names.json.tmp-123"} {
+	for _, f := range []string{"names.json.tmp", "names.json.tmp-123", ".names.json.tmp-456"} {
 		if _, err := os.Lstat(filepath.Join(cfg.StateDir, f)); !errors.Is(err, fs.ErrNotExist) {
 			t.Errorf("%s left (%v)", f, err)
 		}

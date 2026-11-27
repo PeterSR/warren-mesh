@@ -1,8 +1,6 @@
 package engine
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/PeterSR/warren-mesh/internal/fsutil"
 	"github.com/PeterSR/warren-mesh/internal/update/manifest"
 	"github.com/PeterSR/warren-mesh/internal/update/semver"
 	"github.com/PeterSR/warren-mesh/internal/update/uconfig"
@@ -24,16 +23,6 @@ type Candidate struct {
 	Dir      string
 }
 
-// ManifestName is the file name of a manifest in a source: the exact release
-// <component>-<version>.manifest.json when version is not empty, else the
-// pointer of a channel, <component>.<channel>.manifest.json.
-func ManifestName(component, channel, version string) string {
-	if version != "" {
-		return component + "-" + version + ".manifest.json"
-	}
-	return component + "." + channel + ".manifest.json"
-}
-
 // LoadFromDir reads and verifies the manifest of a component from a source
 // directory (the layout in docs/updates.md, "Making a release"). With a version it reads that
 // exact release (the version is validated as semver before it is put in a file
@@ -42,16 +31,25 @@ func ManifestName(component, channel, version string) string {
 // verified version wins. The directory is untrusted: only a signature made by a
 // key of the component counts.
 func LoadFromDir(dir string, c *uconfig.Comp, version string) (*Candidate, error) {
+	return loadFromDir(dir, c, version, time.Sleep)
+}
+
+// LoadFromDir is the package function with the engine's Wait.
+func (e *Engine) LoadFromDir(dir string, c *uconfig.Comp, version string) (*Candidate, error) {
+	return loadFromDir(dir, c, version, e.wait)
+}
+
+func loadFromDir(dir string, c *uconfig.Comp, version string, wait func(time.Duration)) (*Candidate, error) {
 	var names []string
 	if version != "" {
 		if _, err := semver.Parse(version); err != nil {
 			return nil, fmt.Errorf("--version: %w", err)
 		}
-		names = []string{ManifestName(c.Name, "", version)}
+		names = []string{manifest.FileName(c.Name, "", version)}
 	} else {
-		names = []string{ManifestName(c.Name, c.Channel, "")}
+		names = []string{manifest.FileName(c.Name, c.Channel, "")}
 		if c.Channel == manifest.Dev && len(c.Keys[manifest.Stable]) > 0 {
-			names = append(names, ManifestName(c.Name, manifest.Stable, ""))
+			names = append(names, manifest.FileName(c.Name, manifest.Stable, ""))
 		}
 	}
 	var best *Candidate
@@ -62,7 +60,7 @@ func LoadFromDir(dir string, c *uconfig.Comp, version string) (*Candidate, error
 			// A pointer is a manifest and a signature in two files, which cannot be
 			// replaced together: a reader that catches the pair between the two
 			// renames looks again once, before it falls back to another pointer.
-			Wait(RetryAfter)
+			wait(retryAfter)
 			cand, err = readPair(dir, n, c, version)
 		}
 		if err != nil {
@@ -88,13 +86,9 @@ func LoadFromDir(dir string, c *uconfig.Comp, version string) (*Candidate, error
 	return best, nil
 }
 
-// RetryAfter is how long LoadFromDir waits before it reads a pointer again
-// after a manifest and signature that do not belong together; Wait is what
-// waits (tests replace it, so they need no real time).
-var (
-	RetryAfter = 200 * time.Millisecond
-	Wait       = time.Sleep
-)
+// retryAfter is how long LoadFromDir waits before it reads a pointer again
+// after a manifest and signature that do not belong together.
+const retryAfter = 200 * time.Millisecond
 
 // readPair reads and verifies one manifest and its signature.
 func readPair(dir, n string, c *uconfig.Comp, version string) (*Candidate, error) {
@@ -134,12 +128,12 @@ func OpenFile(dir, name string, size int64, sha string) (*os.File, error) {
 		f.Close()
 		return nil, fmt.Errorf("%s is not a regular file of the signed size (%d bytes)", name, size)
 	}
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	sum, err := fsutil.SHA256Reader(f)
+	if err != nil {
 		f.Close()
 		return nil, err
 	}
-	if hex.EncodeToString(h.Sum(nil)) != sha {
+	if sum != sha {
 		f.Close()
 		return nil, fmt.Errorf("%s does not match the signed digest", name)
 	}

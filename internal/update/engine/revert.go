@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
+	"maps"
+	"slices"
 
+	"github.com/PeterSR/warren-mesh/internal/fsutil"
 	"github.com/PeterSR/warren-mesh/internal/update/semver"
 	"github.com/PeterSR/warren-mesh/internal/update/state"
 	"github.com/PeterSR/warren-mesh/internal/update/uconfig"
@@ -54,7 +56,7 @@ func (e *Engine) revertLocked(ctx context.Context, c *uconfig.Comp, rec *state.R
 	// revert is now unfinished (a reverted record with a non-empty prev).
 	rec.Phase = state.Reverted
 	if o.bad != "" && rec.Installed != nil && !rec.IsBad(rec.Installed.Version) {
-		rec.Bad = append(rec.Bad, state.Bad{Version: rec.Installed.Version, Reason: o.bad, At: time.Now().UTC()})
+		rec.Bad = append(rec.Bad, state.Bad{Version: rec.Installed.Version, Reason: o.bad, At: e.now().UTC()})
 	}
 	rec.LastError = o.reason
 	rec.Deadline, rec.HealthySince, rec.CanaryEnds = nil, nil, nil
@@ -78,12 +80,12 @@ func (e *Engine) finishRevertLocked(ctx context.Context, c *uconfig.Comp, rec *s
 	// A target that equals prev is left alone (this test comes first); one that
 	// equals the new version gets .prev renamed back over it; one that equals
 	// neither, or a wrong .prev, makes the component failed.
-	for _, t := range sortedKeys(rec.Prev.Files) {
+	for _, t := range slices.Sorted(maps.Keys(rec.Prev.Files)) {
 		path, ok := targets[t]
 		if !ok {
 			return e.failRevert(rec, fmt.Errorf("target %s is not configured", t))
 		}
-		cur, err := hashFile(path)
+		cur, err := fsutil.SHA256File(path)
 		switch {
 		case err != nil:
 			return e.failRevert(rec, fmt.Errorf("target %s: %v", t, err))
@@ -105,7 +107,7 @@ func (e *Engine) finishRevertLocked(ctx context.Context, c *uconfig.Comp, rec *s
 	// process killed by its own request never leaves the record unfinished. The
 	// boot is recorded with the request, so a Warren restart after this point
 	// can be told from one before it.
-	restored := &state.Installed{Version: rec.Prev.Version, Files: rec.Prev.Files, InstalledAt: time.Now().UTC()}
+	restored := &state.Installed{Version: rec.Prev.Version, Files: rec.Prev.Files, InstalledAt: e.now().UTC()}
 	if rec.Installed != nil {
 		restored.Floor = rec.Installed.Floor
 		// The version before is not known: the version reverted away keeps the
@@ -119,7 +121,7 @@ func (e *Engine) finishRevertLocked(ctx context.Context, c *uconfig.Comp, rec *s
 	rec.HealthySince, rec.CanaryEnds, rec.Deadline = nil, nil, nil
 	rec.Watch = state.Watch{}
 	if restart {
-		rec.Request = &state.Request{At: time.Now().UTC()}
+		rec.Request = &state.Request{At: e.now().UTC()}
 		if e.ctl != nil {
 			if s, err := e.ctl.Service(ctx, c.Service); err == nil {
 				rec.Watch = state.Watch{Boot: s.Boot, UnrequestedTotal: s.Unrequested()}

@@ -5,9 +5,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 
+	"github.com/PeterSR/warren-mesh/internal/fsutil"
 	"github.com/PeterSR/warren-mesh/internal/update/manifest"
 	"github.com/PeterSR/warren-mesh/internal/update/semver"
 )
@@ -83,9 +86,9 @@ func (e *Engine) Stage(comp string, manifestBytes, sig []byte) (*StageResult, er
 	if err != nil {
 		return nil, refuse("manifest refused: %v", err)
 	}
-	pl, ok := m.Platforms[Platform]
+	pl, ok := m.Platforms[e.platform]
 	if !ok {
-		return nil, refuse("version %s has no build for %s", m.Version, Platform)
+		return nil, refuse("version %s has no build for %s", m.Version, e.platform)
 	}
 	dir := e.stagingDir(comp, m.Version)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -98,7 +101,7 @@ func (e *Engine) Stage(comp string, manifestBytes, sig []byte) (*StageResult, er
 		return nil, err
 	}
 	res := &StageResult{Component: comp, Version: m.Version, Channel: m.Channel, Manual: m.Manual, Need: []StageNeed{}}
-	for _, t := range sortedKeys(pl.Files) {
+	for _, t := range slices.Sorted(maps.Keys(pl.Files)) {
 		f := pl.Files[t]
 		// Already staged only if the bytes on disk have the signed digest, not
 		// just the signed size.
@@ -117,7 +120,7 @@ func stagedOK(path string, f manifest.File) bool {
 	if err != nil || !fi.Mode().IsRegular() || fi.Size() != f.Size {
 		return false
 	}
-	sum, err := hashFile(path)
+	sum, err := fsutil.SHA256File(path)
 	return err == nil && sum == f.SHA256
 }
 
@@ -134,14 +137,14 @@ func (e *Engine) ReceiveFile(comp, version, sha string, r io.Reader) error {
 		return err
 	}
 	var want *manifest.File
-	for _, f := range m.Platforms[Platform].Files {
+	for _, f := range m.Platforms[e.platform].Files {
 		if f.SHA256 == sha {
 			f := f
 			want = &f
 		}
 	}
 	if want == nil {
-		return refuse("digest %s is not named in the manifest for %s", sha, Platform)
+		return refuse("digest %s is not named in the manifest for %s", sha, e.platform)
 	}
 	// A part file of its own for each writer, so two uploads of the same file
 	// never share one.

@@ -5,8 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
+
+	"github.com/PeterSR/warren-mesh/internal/fsutil"
 )
 
 // LockName is the file in the state directory whose exclusive flock marks the
@@ -18,7 +19,8 @@ const LockName = "update.lock"
 const SocketName = "updater.sock"
 
 // PrepareStateDir makes the state directory (0700) and refuses one that
-// others can use.
+// others can use. The updater's policy is strict: any access for group or
+// others (0o077) refuses, where the daemon only refuses write (0o022).
 func PrepareStateDir(dir string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
@@ -30,7 +32,7 @@ func PrepareStateDir(dir string) error {
 	if fi.Mode().Perm()&0o077 != 0 {
 		return fmt.Errorf("state_dir %s must not be accessible by group or others (mode %v); make it 0700", dir, fi.Mode().Perm())
 	}
-	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Geteuid() {
+	if uid, ok := fsutil.OwnerUID(fi); ok && uid != os.Geteuid() {
 		return fmt.Errorf("state_dir %s is not owned by the user running the updater", dir)
 	}
 	return nil
@@ -48,7 +50,7 @@ func CheckStateDir(dir string) error {
 	if !fi.IsDir() {
 		return fmt.Errorf("state_dir %s is not a directory", dir)
 	}
-	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Geteuid() {
+	if uid, ok := fsutil.OwnerUID(fi); ok && uid != os.Geteuid() {
 		return fmt.Errorf("state_dir %s belongs to another user: run this command as the user that runs warren-update", dir)
 	}
 	if fi.Mode().Perm()&0o077 != 0 {
@@ -67,11 +69,11 @@ func AcquireLock(stateDir string, wait time.Duration) (*os.File, error) {
 	}
 	deadline := time.Now().Add(wait)
 	for {
-		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		err := fsutil.TryLock(f)
 		if err == nil {
 			return f, nil
 		}
-		if !errors.Is(err, syscall.EWOULDBLOCK) {
+		if !errors.Is(err, fsutil.ErrLocked) {
 			f.Close()
 			return nil, err
 		}

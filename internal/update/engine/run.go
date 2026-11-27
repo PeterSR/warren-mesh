@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/PeterSR/warren-mesh/client"
@@ -74,29 +75,27 @@ func Run(ctx context.Context, o RunOptions) error {
 	if o.Reload != nil {
 		o.Reload(reload)
 	}
-	srv, err := Listen(filepath.Join(cfg.StateDir, SocketName), e.Handler(reload))
+	srv, err := Listen(filepath.Join(cfg.StateDir, SocketName), e.Handler(reload), o.Log)
 	if err != nil {
 		return fmt.Errorf("updater socket: %w", err)
 	}
 	defer srv.Close()
-	done := make(chan struct{}, 2)
-	go func() { e.Watch(ctx); done <- struct{}{} }()
+	var wg sync.WaitGroup
+	wg.Go(func() { e.Watch(ctx) })
 	sock := o.ServiceSocket
 	if sock == "" {
 		sock = os.Getenv(client.EnvSocket)
 	}
 	if sock != "" {
-		go func() { serveLease(ctx, sock, o.Log); done <- struct{}{} }()
+		wg.Go(func() { serveLease(ctx, sock, o.Log) })
 	} else {
 		o.Log.Warn("no service socket: the updater runs without a lease")
-		done <- struct{}{}
 	}
 	if o.Ready != nil {
 		o.Ready(e)
 	}
 	<-ctx.Done()
-	<-done
-	<-done
+	wg.Wait()
 	return nil
 }
 

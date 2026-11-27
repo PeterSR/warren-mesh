@@ -13,8 +13,10 @@ import (
 )
 
 // The updater talks to Warren through the documented control API
-// (docs/control-api.md) and nothing else of Warren's: it imports none of
-// Warren's internal packages.
+// (docs/control-api.md) and nothing else of the daemon's: it imports none of
+// the daemon's internals (service, daemon, config). The leaf packages
+// internal/platform and internal/fsutil, which hold operating system calls
+// and file helpers and know nothing of the daemon, are shared.
 
 // ErrNotFound is a 404: the service is not managed now. A caller treats it as
 // "not there at the moment", never as a failure.

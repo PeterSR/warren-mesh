@@ -3,6 +3,7 @@ package link
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/PeterSR/warren-mesh/internal/apierr"
+	"github.com/PeterSR/warren-mesh/internal/grammar"
 )
 
 // Backend is what a transport does; TransportHandler turns it into the
@@ -40,11 +42,11 @@ func TransportHandler(b Backend) http.Handler {
 		writeJSON(w, b.Hello(r.Context()))
 	})
 	mux.HandleFunc("GET /v1/transport/peers", func(w http.ResponseWriter, r *http.Request) {
-		wait := 25
+		wait := grammar.MaxWaitSeconds
 		if s := r.URL.Query().Get("wait"); s != "" {
 			n, err := strconv.Atoi(s)
-			if err != nil || n < 0 || n > 25 {
-				apierr.Write(w, apierr.BadRequest, "wait is whole seconds, 0 to 25")
+			if err != nil || n < 0 || n > grammar.MaxWaitSeconds {
+				apierr.Write(w, apierr.BadRequest, fmt.Sprintf("wait is whole seconds, 0 to %d", grammar.MaxWaitSeconds))
 				return
 			}
 			wait = n

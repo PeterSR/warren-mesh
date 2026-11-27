@@ -9,19 +9,29 @@ import (
 	"net/url"
 	"strconv"
 	"time"
+
+	"github.com/PeterSR/warren-mesh/internal/grammar"
 )
 
 // Limits of entries, from the contract.
 const (
-	MaxEntryData   = 3 << 10
-	MaxPutEntries  = 1000
-	MaxPutReserved = 64
-	MaxPutBody     = 4 << 20
-	MinPutInterval = time.Second
-	MaxViewPolls   = 4
-	// MaxInflight is the most inflight a socket has (and so polls per lease).
-	MaxInflight      = 32
-	MaxWait          = 25 * time.Second
+	// MaxEntryData is the most data one entry holds (3 KiB).
+	MaxEntryData = grammar.MaxEntryData
+	// MaxPutEntries is the most entries one PUT holds (1000).
+	MaxPutEntries = grammar.MaxPutEntries
+	// MaxPutReserved is the most reserved names one PUT holds (64).
+	MaxPutReserved = grammar.MaxPutReserved
+	// MaxPutBody is the most a PUT of entries may carry (4 MiB).
+	MaxPutBody = grammar.MaxPutBody
+	// MinPutInterval is the least time between two PUTs on one socket (1 s).
+	MinPutInterval = grammar.MinPutInterval
+	// MaxViewPolls is the most view polls a socket holds (4).
+	MaxViewPolls = grammar.MaxViewPolls
+	// MaxInflight is the most inflight a socket has (and so polls per lease), 32.
+	MaxInflight = grammar.MaxInflight
+	// MaxWait is the longest a long poll waits (25 s).
+	MaxWait = grammar.MaxWait
+
 	viewRequestSlack = 15 * time.Second
 )
 
@@ -71,7 +81,7 @@ func (c *Client) PutEntries(ctx context.Context, lease string, e EntriesRequest)
 	if err != nil {
 		// Entry data that is not JSON: nothing was sent, and sending it again
 		// cannot help.
-		return nil, &Error{Code: CodeBadRequest, Detail: "entries cannot be encoded: " + err.Error()}
+		return nil, &Error{Code: CodeBadRequest, Detail: "entries cannot be encoded: " + err.Error(), Err: err}
 	}
 	// A flat child's PUT may be held up to 10 s while the node's own
 	// services publish first.

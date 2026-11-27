@@ -32,7 +32,7 @@ const (
 	// who can make a directory gets them.
 	// MaxInflight is the most inflight a socket may be given: a lease may have
 	// that many polls open, and a socket takes 64 connections in all.
-	MaxInflight = 32
+	MaxInflight = grammar.MaxInflight
 	// SocketConns is how many connections a service socket takes, and
 	// ViewPollConns how many of them the view polls may hold; inflight +
 	// outflight + ViewPollConns must fit in SocketConns.
@@ -86,7 +86,7 @@ func (t *Transport) UnmarshalYAML(n *yaml.Node) error {
 		return n.Decode(&t.Name)
 	}
 	if n.Kind != yaml.MappingNode {
-		return confload.Public(errors.New("transport: a name or a mapping with run, or link_a and link_b"))
+		return confload.MarkSafe(errors.New("transport: a name or a mapping with run, or link_a and link_b"))
 	}
 	var raw struct {
 		Run   []string `yaml:"run"`
@@ -99,7 +99,7 @@ func (t *Transport) UnmarshalYAML(n *yaml.Node) error {
 		switch k := n.Content[i].Value; k {
 		case "run", "link_a", "link_b", "uid":
 		default:
-			return confload.Public(fmt.Errorf("transport: unknown key %q", k))
+			return confload.MarkSafe(fmt.Errorf("transport: unknown key %q", k))
 		}
 	}
 	if err := n.Decode(&raw); err != nil {

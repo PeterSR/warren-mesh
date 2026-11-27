@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 )
 
@@ -35,6 +36,11 @@ type Error struct {
 	Detail string
 	// Status is the HTTP status.
 	Status int
+	// Err is the local cause, for an error the client made itself, such as a
+	// call that was sent and then lost to a cancelled context: errors.Is(err,
+	// context.DeadlineExceeded) works through it. It is nil for an error the
+	// server reported.
+	Err error
 }
 
 func (e *Error) Error() string {
@@ -48,6 +54,9 @@ func (e *Error) Error() string {
 	return s
 }
 
+// Unwrap returns Err, the local cause, if there is one.
+func (e *Error) Unwrap() error { return e.Err }
+
 // Is makes errors.Is(err, &client.Error{Code: client.CodeBusy}) match any
 // error with that code.
 func (e *Error) Is(target error) bool {
@@ -59,61 +68,61 @@ func (e *Error) Is(target error) bool {
 type Advice int
 
 const (
-	// FixCall: the call is malformed or missing something (bad-request).
-	FixCall Advice = iota
-	// Split: a body is over its limit (too-large).
-	Split
-	// GiveUp: do not try again (refused, version).
-	GiveUp
-	// GiveUpOrLater: the target is not known now; give up, or try again
+	// AdviceFixCall: the call is malformed or missing something (bad-request).
+	AdviceFixCall Advice = iota
+	// AdviceSplit: a body is over its limit (too-large).
+	AdviceSplit
+	// AdviceGiveUp: do not try again (refused, version).
+	AdviceGiveUp
+	// AdviceGiveUpOrLater: the target is not known now; give up, or try again
 	// later (no-target).
-	GiveUpOrLater
-	// RetryLater: try again later (no-service).
-	RetryLater
-	// RetryWithBackoff: try again, backing off (busy, offline).
-	RetryWithBackoff
-	// RetryShortly: try again soon (not-ready).
-	RetryShortly
-	// WaitOrTakeOver: another lease serves this socket; wait, or take over
+	AdviceGiveUpOrLater
+	// AdviceRetryLater: try again later (no-service).
+	AdviceRetryLater
+	// AdviceRetryWithBackoff: try again, backing off (busy, offline).
+	AdviceRetryWithBackoff
+	// AdviceRetryShortly: try again soon (not-ready).
+	AdviceRetryShortly
+	// AdviceWaitOrTakeOver: another lease serves this socket; wait, or take over
 	// (already-served).
-	WaitOrTakeOver
-	// Drop: the lease, poll or call has ended; drop it (gone).
-	Drop
-	// RetryIfIdempotent: the call was sent and its outcome is unknown; retry
+	AdviceWaitOrTakeOver
+	// AdviceDrop: the lease, poll or call has ended; drop it (gone).
+	AdviceDrop
+	// AdviceRetryIfIdempotent: the call was sent and its outcome is unknown; retry
 	// only if repeating it is harmless (unknown, timeout).
-	RetryIfIdempotent
-	// DoWithout: this Warren lacks the endpoint (unsupported).
-	DoWithout
+	AdviceRetryIfIdempotent
+	// AdviceDoWithout: this Warren lacks the endpoint (unsupported).
+	AdviceDoWithout
 )
 
 // Advice is the "caller should" column of the error table for this code. A
-// code that is not in the table (from a newer Warren) is GiveUp.
+// code that is not in the table (from a newer Warren) is AdviceGiveUp.
 func (e *Error) Advice() Advice {
 	switch e.Code {
 	case CodeBadRequest:
-		return FixCall
+		return AdviceFixCall
 	case CodeTooLarge:
-		return Split
+		return AdviceSplit
 	case CodeRefused, CodeVersion:
-		return GiveUp
+		return AdviceGiveUp
 	case CodeNoTarget:
-		return GiveUpOrLater
+		return AdviceGiveUpOrLater
 	case CodeNoService:
-		return RetryLater
+		return AdviceRetryLater
 	case CodeBusy, CodeOffline:
-		return RetryWithBackoff
+		return AdviceRetryWithBackoff
 	case CodeNotReady:
-		return RetryShortly
+		return AdviceRetryShortly
 	case CodeAlreadyServed:
-		return WaitOrTakeOver
+		return AdviceWaitOrTakeOver
 	case CodeGone:
-		return Drop
+		return AdviceDrop
 	case CodeUnknown, CodeTimeout:
-		return RetryIfIdempotent
+		return AdviceRetryIfIdempotent
 	case CodeUnsupported:
-		return DoWithout
+		return AdviceDoWithout
 	}
-	return GiveUp
+	return AdviceGiveUp
 }
 
 // Retryable reports whether the same request may simply be sent again,
@@ -122,7 +131,7 @@ func (e *Error) Advice() Advice {
 // and timeout may have happened (see MaybeDelivered).
 func (e *Error) Retryable() bool {
 	switch e.Advice() {
-	case RetryLater, RetryWithBackoff, RetryShortly:
+	case AdviceRetryLater, AdviceRetryWithBackoff, AdviceRetryShortly:
 		return true
 	}
 	return false
@@ -130,7 +139,7 @@ func (e *Error) Retryable() bool {
 
 // MaybeDelivered reports whether the call may have reached its target and
 // its outcome is unknown (unknown, timeout): retry only if idempotent.
-func (e *Error) MaybeDelivered() bool { return e.Advice() == RetryIfIdempotent }
+func (e *Error) MaybeDelivered() bool { return e.Advice() == AdviceRetryIfIdempotent }
 
 // AsError finds the *Error in err's chain.
 func AsError(err error) (*Error, bool) {
@@ -155,12 +164,7 @@ func IsCode(err error, codes ...string) bool {
 	if c == "" {
 		return false
 	}
-	for _, x := range codes {
-		if c == x {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(codes, c)
 }
 
 // IsRetryable reports whether err is a server error that says the request

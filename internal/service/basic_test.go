@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"errors"
-	"github.com/PeterSR/warren-mesh/internal/link"
 	"log/slog"
 	"net"
 	"net/http"
@@ -14,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/PeterSR/warren-mesh/internal/link"
 
 	"github.com/PeterSR/warren-mesh/internal/apierr"
 )
@@ -527,21 +528,6 @@ func TestPreExistingOpenServicesDirIsClosed(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "services.dir mode changed") {
 		t.Errorf("the change is not logged:\n%s", buf.String())
-	}
-}
-
-func TestWriteDurablyReplacesTheFile(t *testing.T) {
-	p := filepath.Join(tmpDir(t), "f.json")
-	for _, want := range []string{"one", "two"} {
-		if err := writeDurably(p, []byte(want)); err != nil {
-			t.Fatal(err)
-		}
-		if got, _ := os.ReadFile(p); string(got) != want {
-			t.Errorf("got %q want %q", got, want)
-		}
-	}
-	if _, err := os.Stat(p + ".tmp"); err == nil {
-		t.Error("temporary file left behind")
 	}
 }
 

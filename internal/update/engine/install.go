@@ -2,12 +2,16 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
+	"github.com/PeterSR/warren-mesh/internal/fsutil"
 	"github.com/PeterSR/warren-mesh/internal/update/manifest"
 	"github.com/PeterSR/warren-mesh/internal/update/semver"
 	"github.com/PeterSR/warren-mesh/internal/update/state"
@@ -31,7 +35,7 @@ type InstallRequest struct {
 type InstallResult struct {
 	Component string            `json:"component"`
 	Version   string            `json:"version"`
-	Phase     string            `json:"phase"`
+	Phase     state.Phase       `json:"phase"`
 	Message   string            `json:"message"`
 	Replaces  string            `json:"replaces,omitempty"`
 	Targets   map[string]string `json:"targets,omitempty"`
@@ -145,7 +149,7 @@ func (e *Engine) Install(ctx context.Context, req InstallRequest) (*InstallResul
 	case rec.UnfinishedRevert():
 		// --force does not pass it: the revert is finished by the watcher (or at
 		// the next start), never overwritten by an install.
-		return nil, refuse("component %s has an unfinished revert: wait for it to finish; --force does not skip it (if its service is gone, add explicit targets to it in the config and reload, so the watcher can finish it; a target must have the name the record uses (normally the component name) and point at the file the service ran)", c.Name)
+		return nil, refuseUnfinishedRevert(c.Name)
 	case rec.WatchingRestored() && !req.Force:
 		return nil, refuse("component %s is waiting for a restart after a revert: wait for it, or use --force", c.Name)
 	case rec.Phase == state.Failed && !req.Force:
@@ -174,9 +178,9 @@ func (e *Engine) Install(ctx context.Context, req InstallRequest) (*InstallResul
 // plan decides, from config, state and the manifest, whether the install may
 // proceed, and gathers what it needs. It changes nothing but the drift flag.
 func (e *Engine) plan(ctx context.Context, c *uconfig.Comp, m *manifest.Manifest, data, sig []byte, dir string, svc *Service, rec *state.Record, req InstallRequest) (*plan, error) {
-	files := m.Platforms[Platform].Files
+	files := m.Platforms[e.platform].Files
 	if len(files) == 0 {
-		return nil, refuse("version %s has no build for %s", m.Version, Platform)
+		return nil, refuse("version %s has no build for %s", m.Version, e.platform)
 	}
 	if svc.ExeError != "" || svc.Exe == "" {
 		return nil, refuse("%s", exeProblem(svc))
@@ -185,10 +189,10 @@ func (e *Engine) plan(ctx context.Context, c *uconfig.Comp, m *manifest.Manifest
 	if err != nil {
 		return nil, err
 	}
-	if got, want := fmt.Sprint(m.Targets()), fmt.Sprint(sortedNames(targets)); got != want {
-		return nil, refuse("the manifest's targets %s are not the configured targets %s", got, want)
+	if got, want := m.Targets(), slices.Sorted(maps.Keys(targets)); !slices.Equal(got, want) {
+		return nil, refuse("the manifest's targets %v are not the configured targets %v", got, want)
 	}
-	for _, t := range sortedNames(targets) {
+	for _, t := range slices.Sorted(maps.Keys(targets)) {
 		if err := uconfig.CheckTargetPath(targets[t], os.Geteuid()); err != nil {
 			return nil, refuse("target %s: %v", t, err)
 		}
@@ -204,9 +208,14 @@ func (e *Engine) plan(ctx context.Context, c *uconfig.Comp, m *manifest.Manifest
 	}
 	// Drift: a binary replaced by hand.
 	if rec.Installed != nil && rec.Phase != state.Probation {
-		if cur, err := hashTargets(targets); err == nil && !sameFiles(cur, rec.Installed.Files) && rec.NeedsManual == "" {
+		if cur, err := hashTargets(targets); err == nil && !maps.Equal(cur, rec.Installed.Files) && rec.NeedsManual == "" {
 			rec.NeedsManual = state.Drift
-			_ = e.save(rec)
+			// The flag stays on rec, which the install saves again at step 1;
+			// a failure here only means the drift is not recorded if the
+			// install is then refused.
+			if err := e.save(rec); err != nil {
+				e.log.Warn("cannot record that the target was replaced by hand", "component", c.Name, "err", err)
+			}
 		}
 	}
 	if !req.Force && rec.IsBad(m.Version) {
@@ -233,7 +242,7 @@ func (e *Engine) plan(ctx context.Context, c *uconfig.Comp, m *manifest.Manifest
 			}
 		}
 	}
-	for _, t := range sortedKeys(files) {
+	for _, t := range slices.Sorted(maps.Keys(files)) {
 		if fi, err := os.Lstat(filepath.Join(dir, files[t].SHA256)); err != nil || !fi.Mode().IsRegular() || fi.Size() != files[t].Size {
 			return nil, refuse("file for target %s is not staged", t)
 		}
@@ -273,7 +282,7 @@ func checkSpace(targets map[string]string, files map[string]manifest.File) error
 // install owns.
 func (e *Engine) run(ctx context.Context, p *plan, rec *state.Record) error {
 	c, m := p.comp, p.m
-	names := sortedNames(p.targets)
+	names := slices.Sorted(maps.Keys(p.targets))
 	cfg := e.config()
 	prevFiles, err := hashTargets(p.targets)
 	if err != nil {
@@ -290,10 +299,10 @@ func (e *Engine) run(ctx context.Context, p *plan, rec *state.Record) error {
 		newFiles[t] = f.SHA256
 	}
 	prevVersion := ""
-	if rec.Installed != nil && sameFiles(prevFiles, rec.Installed.Files) {
+	if rec.Installed != nil && maps.Equal(prevFiles, rec.Installed.Files) {
 		prevVersion = rec.Installed.Version
 	}
-	now := time.Now().UTC()
+	now := e.now().UTC()
 	deadline := now.Add(cfg.HealthTimeout)
 	// Step 1: the record, before any file changes.
 	rec.Phase = state.Installing
@@ -332,7 +341,7 @@ func (e *Engine) run(ctx context.Context, p *plan, rec *state.Record) error {
 		}
 	}
 	for dir := range dirsOf(p.targets) {
-		if err := state.SyncDir(dir); err != nil {
+		if err := fsutil.SyncDir(dir); err != nil {
 			return fail(err)
 		}
 	}
@@ -356,7 +365,7 @@ func (e *Engine) run(ctx context.Context, p *plan, rec *state.Record) error {
 		if err := uconfig.CheckTargetPath(p.targets[t], os.Geteuid()); err != nil {
 			return fail(refuse("target %s: %v", t, err))
 		}
-		if now, err := hashFile(p.targets[t]); err != nil || now != prevFiles[t] {
+		if cur, err := fsutil.SHA256File(p.targets[t]); err != nil || cur != prevFiles[t] {
 			return fail(refuse("target %s changed while the install was prepared", t))
 		}
 	}
@@ -376,12 +385,16 @@ func (e *Engine) run(ctx context.Context, p *plan, rec *state.Record) error {
 			return err
 		}
 	}
+	// The renames are done and cannot be undone by failing here: a directory
+	// that cannot be synced is logged, and the install goes on.
 	for dir := range dirsOf(p.targets) {
-		_ = state.SyncDir(dir)
+		if err := fsutil.SyncDir(dir); err != nil {
+			e.log.Warn("cannot sync the directory of a swapped file", "component", c.Name, "dir", dir, "err", err)
+		}
 	}
 	// Step 5: probation, then the restart request.
 	rec.Phase = state.Probation
-	rec.Request = &state.Request{At: time.Now().UTC()}
+	rec.Request = &state.Request{At: e.now().UTC()}
 	if err := e.save(rec); err != nil {
 		return fail(err) // nothing was restarted yet: undo the swap
 	}
@@ -411,7 +424,7 @@ func (e *Engine) requestRestart(ctx context.Context, c *uconfig.Comp, rec *state
 	if err != nil {
 		return false
 	}
-	min, err := e.ctl.Restart(ctx, c.Service)
+	minSeq, err := e.ctl.Restart(ctx, c.Service)
 	if err != nil {
 		return false
 	}
@@ -422,7 +435,7 @@ func (e *Engine) requestRestart(ctx context.Context, c *uconfig.Comp, rec *state
 	if rec.Watch.Boot != s0.Boot {
 		rec.Watch = state.Watch{Boot: s0.Boot, UnrequestedTotal: s0.Unrequested()}
 	}
-	rec.Request.MinStartSeq = &min
+	rec.Request.MinStartSeq = &minSeq
 	return true
 }
 
@@ -452,5 +465,5 @@ func (e *Engine) abort(ctx context.Context, c *uconfig.Comp, rec *state.Record, 
 }
 
 func sha256hex(b []byte) string {
-	return fmt.Sprintf("%x", sum256(b))
+	return fmt.Sprintf("%x", sha256.Sum256(b))
 }

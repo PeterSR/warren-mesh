@@ -206,14 +206,14 @@ func (w *world) release(version string, content []byte) string {
 	name := "myapp_" + version
 	os.WriteFile(filepath.Join(src, name), content, 0o644)
 	m := &manifest.Manifest{Format: manifest.Format, Component: "myapp", Version: version, Channel: manifest.Dev, Created: "2026-11-26T10:00:00Z",
-		Platforms: map[string]manifest.Platform{engine.Platform: {Files: map[string]manifest.File{"myapp": {Name: name, Size: int64(len(content)), SHA256: sha(content)}}}}}
+		Platforms: map[string]manifest.Platform{engine.HostPlatform: {Files: map[string]manifest.File{"myapp": {Name: name, Size: int64(len(content)), SHA256: sha(content)}}}}}
 	data, err := m.Marshal()
 	if err != nil {
 		w.t.Fatal(err)
 	}
 	sig := manifest.Sign(w.key, data, m)
-	os.WriteFile(filepath.Join(src, engine.ManifestName("myapp", "", version)), data, 0o644)
-	os.WriteFile(filepath.Join(src, engine.ManifestName("myapp", "", version)+".minisig"), sig, 0o644)
+	os.WriteFile(filepath.Join(src, manifest.FileName("myapp", "", version)), data, 0o644)
+	os.WriteFile(filepath.Join(src, manifest.FileName("myapp", "", version)+".minisig"), sig, 0o644)
 	return src
 }
 

@@ -31,10 +31,11 @@ func TestUsage(t *testing.T) {
 		t.Error("version")
 	}
 	// status without a running Warren fails.
-	d, _ := os.MkdirTemp("", "m")
-	defer os.RemoveAll(d)
+	d := t.TempDir()
 	cfg := filepath.Join(d, "c.yaml")
-	os.WriteFile(cfg, []byte("node: n1\nstate_dir: "+d+"/st\n"), 0o600)
+	if err := os.WriteFile(cfg, []byte("node: n1\nstate_dir: "+d+"/st\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	errb.Reset()
 	if run([]string{"status", "--config", cfg}, &out, &errb) != 1 || !strings.Contains(errb.String(), "cannot reach") {
 		t.Errorf("status of nothing: %q", errb.String())

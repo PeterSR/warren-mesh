@@ -5,7 +5,8 @@
 //
 // This release covers service components installed from a directory. The engine
 // talks to Warren only through the documented control API and imports none of
-// Warren's internal packages.
+// the daemon's internals (service, daemon, config); it shares the leaf
+// packages internal/platform and internal/fsutil.
 package engine
 
 import (
@@ -13,9 +14,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -25,9 +28,9 @@ import (
 	"github.com/PeterSR/warren-mesh/internal/update/uconfig"
 )
 
-// Platform is the goos/goarch of this build; a manifest must list it. A
-// variable so tests can pretend.
-var Platform = runtime.GOOS + "/" + runtime.GOARCH
+// HostPlatform is the goos/goarch of this build; a manifest must list it for
+// an install to be accepted. Options.Platform overrides it for an Engine.
+const HostPlatform = runtime.GOOS + "/" + runtime.GOARCH
 
 // ErrInjected is what a test hook returns to simulate a crash at that point:
 // the operation stops at once and does nothing more, as a killed process would.
@@ -38,6 +41,16 @@ var ErrInjected = errors.New("injected crash")
 type Refusal struct{ Msg string }
 
 func (r *Refusal) Error() string { return r.Msg }
+
+// freeUnfinishedHint says how an unfinished revert whose service Warren no
+// longer reports is freed.
+const freeUnfinishedHint = "if its service is gone, add explicit targets to it in the config and reload, so the watcher can finish it; a target must have the name the record uses (normally the component name) and point at the file the service ran"
+
+// refuseUnfinishedRevert is the refusal of an install while the component has
+// a revert that is not finished; --force does not pass it.
+func refuseUnfinishedRevert(name string) error {
+	return refuse("component %s has an unfinished revert: wait for it to finish; --force does not skip it (%s)", name, freeUnfinishedHint)
+}
 
 func refuse(format string, args ...any) error { return &Refusal{Msg: fmt.Sprintf(format, args...)} }
 
@@ -56,6 +69,14 @@ type Options struct {
 	// the recovery; returning ErrInjected stops the operation as a crash would
 	// (tests).
 	Hook func(point string) error
+	// Now is the clock; default time.Now. Tests inject their own.
+	Now func() time.Time
+	// Wait pauses for a duration, where the engine waits for another process
+	// to finish what it is doing; default time.Sleep. Tests inject a hook that
+	// needs no real time.
+	Wait func(time.Duration)
+	// Platform is the goos/goarch a manifest must list; default HostPlatform.
+	Platform string
 }
 
 // Engine is the updater's logic.
@@ -66,6 +87,10 @@ type Engine struct {
 	version string
 	poll    time.Duration
 	hook    func(string) error
+	nowFn   func() time.Time
+	wait    func(time.Duration)
+	// platform is the goos/goarch a manifest must list.
+	platform string
 
 	mu  sync.Mutex // guards cfg, live, holders, locks, clock
 	cfg *uconfig.Config
@@ -93,9 +118,19 @@ type settleClock struct {
 // New makes an engine.
 func New(o Options) *Engine {
 	e := &Engine{log: o.Log, ctl: o.Control, version: o.Version, poll: o.PollEvery, hook: o.Hook, cfg: o.Config,
+		nowFn: o.Now, wait: o.Wait, platform: o.Platform,
 		holders: map[string]string{}, locks: map[string]*sync.Mutex{}, clock: map[string]*settleClock{}, warned: map[string]time.Time{}}
 	if e.log == nil {
 		e.log = slog.Default()
+	}
+	if e.nowFn == nil {
+		e.nowFn = time.Now
+	}
+	if e.wait == nil {
+		e.wait = time.Sleep
+	}
+	if e.platform == "" {
+		e.platform = HostPlatform
 	}
 	if e.poll <= 0 {
 		e.poll = time.Second
@@ -106,6 +141,9 @@ func New(o Options) *Engine {
 
 // Version is the updater's version.
 func (e *Engine) Version() string { return e.version }
+
+// now is the engine's clock.
+func (e *Engine) now() time.Time { return e.nowFn() }
 
 func (e *Engine) config() *uconfig.Config {
 	e.mu.Lock()
@@ -188,7 +226,7 @@ func (e *Engine) acquire(name string, force bool) error {
 	case kind == holdProbation:
 		return refuse("component %s is on probation: wait for it to settle, or revert it", name)
 	case kind == holdUnfinished:
-		return refuse("component %s has an unfinished revert: wait for it to finish; --force does not skip it (if its service is gone, add explicit targets to it in the config and reload, so the watcher can finish it; a target must have the name the record uses (normally the component name) and point at the file the service ran)", name)
+		return refuseUnfinishedRevert(name)
 	case kind != "" && !force:
 		return refuse("component %s is waiting for a restart (%s); wait for it, or use --force", name, kind)
 	}
@@ -306,7 +344,7 @@ type ComponentStatus struct {
 	Name           string      `json:"name"`
 	Channel        string      `json:"channel"`
 	Service        string      `json:"service"`
-	Phase          string      `json:"phase"`
+	Phase          state.Phase `json:"phase"`
 	Version        string      `json:"version"`
 	Pinned         string      `json:"pinned,omitempty"`
 	Updatable      *bool       `json:"updatable,omitempty"`
@@ -417,7 +455,7 @@ func (e *Engine) Reload(next *uconfig.Config) error {
 		case n == nil:
 			removed = append(removed, name)
 			decided[name] = true
-		case n.Service != old.Components[name].Service || !sameTargets(n.Targets, old.Components[name].Targets):
+		case n.Service != old.Components[name].Service || !maps.Equal(n.Targets, old.Components[name].Targets):
 			decided[name] = true
 		}
 	}
@@ -428,11 +466,11 @@ func (e *Engine) Reload(next *uconfig.Config) error {
 	for _, n := range next.Names() {
 		lockNames[n] = true
 	}
-	for _, name := range sortedKeys(lockNames) {
+	for _, name := range slices.Sorted(maps.Keys(lockNames)) {
 		defer e.lockComp(name)()
 	}
 	var closing []string
-	for _, name := range sortedKeys(decided) {
+	for _, name := range slices.Sorted(maps.Keys(decided)) {
 		r, err := e.store.Load(name)
 		if errors.Is(err, state.ErrNone) {
 			continue
@@ -468,7 +506,7 @@ func (e *Engine) Reload(next *uconfig.Config) error {
 		case r.Phase == state.Installing:
 			return refuse("component %s is being installed; reload after it settles", name)
 		case r.UnfinishedRevert():
-			return refuse("component %s is finishing a revert; reload after it settles (if its service is gone, first add explicit targets to it in the config and reload; a target must have the name the record uses, normally the component name, and point at the file the service ran)", name)
+			return refuse("component %s is finishing a revert; reload after it settles (%s)", name, freeUnfinishedHint)
 		case r.Phase == state.Probation, r.WatchingRestored():
 			closing = append(closing, name)
 		}
@@ -505,18 +543,6 @@ func (e *Engine) Reload(next *uconfig.Config) error {
 	return nil
 }
 
-func sameTargets(a, b map[string]string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, v := range a {
-		if b[k] != v {
-			return false
-		}
-	}
-	return true
-}
-
 // ensureRecordLocked creates the state-lost record of a component that has
 // none; the component lock is held.
 func (e *Engine) ensureRecordLocked(name string) error {
@@ -535,5 +561,3 @@ func (e *Engine) stagingDir(component, version string) string {
 }
 
 func clearDir(path string) { _ = os.RemoveAll(path) }
-
-func sortedNames(m map[string]string) []string { return sortedKeys(m) }

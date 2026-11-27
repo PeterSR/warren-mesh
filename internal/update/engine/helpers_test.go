@@ -180,8 +180,31 @@ func newKey(t *testing.T) kp {
 	return kp{priv, pub.String()}
 }
 
+// fakeClock is the engine's clock in tests: it moves only when a test says so,
+// so a test that waits for a deadline or a settle window runs no real time.
+type fakeClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *fakeClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	c.now = c.now.Add(d)
+	c.mu.Unlock()
+}
+
+// pollStep is how far the fake clock moves between two polls of the watcher.
+const pollStep = 10 * time.Millisecond
+
 type rig struct {
 	t      *testing.T
+	clk    *fakeClock
 	dir    string
 	bin    string
 	target string
@@ -204,7 +227,7 @@ func newRig(t *testing.T, opts ...rigOpt) *rig {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(d) })
-	r := &rig{t: t, dir: d, bin: filepath.Join(d, "bin"), state: filepath.Join(d, "state"), key: newKey(t)}
+	r := &rig{t: t, clk: &fakeClock{now: time.Now()}, dir: d, bin: filepath.Join(d, "bin"), state: filepath.Join(d, "state"), key: newKey(t)}
 	os.MkdirAll(r.bin, 0o755)
 	os.MkdirAll(r.state, 0o700)
 	r.target = filepath.Join(r.bin, "myapp")
@@ -228,7 +251,7 @@ func newRig(t *testing.T, opts ...rigOpt) *rig {
 
 // engine makes a new engine over the same config and state: a restarted updater.
 func (r *rig) engine(hook func(string) error) *Engine {
-	return New(Options{Config: r.cfg, Control: NewControl(r.fw.path), Log: quiet(), Version: "test", PollEvery: 10 * time.Millisecond, Hook: hook})
+	return New(Options{Config: r.cfg, Control: NewControl(r.fw.path), Log: quiet(), Version: "test", PollEvery: pollStep, Hook: hook, Now: r.clk.Now})
 }
 
 func (r *rig) store() state.Store { return state.Store{Dir: r.state} }
@@ -257,7 +280,7 @@ func (r *rig) publish(version, content string, mods ...func(*manifest.Manifest))
 	sum := sha256hex([]byte(content))
 	f := manifest.File{Name: "myapp_" + version, Size: int64(len(content)), SHA256: sum}
 	m = &manifest.Manifest{Format: manifest.Format, Component: "myapp", Version: version, Channel: manifest.Dev, Created: "2026-11-26T10:00:00Z",
-		Platforms: map[string]manifest.Platform{Platform: {Files: map[string]manifest.File{"myapp": f}}}}
+		Platforms: map[string]manifest.Platform{HostPlatform: {Files: map[string]manifest.File{"myapp": f}}}}
 	for _, mod := range mods {
 		mod(m)
 	}
@@ -303,22 +326,35 @@ func (r *rig) until(what string, cond func(*state.Record) bool) {
 
 func (r *rig) untilWith(e *Engine, what string, cond func(*state.Record) bool) {
 	r.t.Helper()
-	dl := time.Now().Add(10 * time.Second)
+	dl := r.clk.Now().Add(10 * time.Second)
 	for {
 		e.Tick(context.Background())
 		if rec, err := r.store().Load("myapp"); err == nil && cond(rec) {
 			return
 		}
-		if time.Now().After(dl) {
+		if r.clk.Now().After(dl) {
 			rec, _ := r.store().Load("myapp")
 			j, _ := json.Marshal(rec)
 			r.t.Fatalf("timed out waiting for %s; record %s", what, j)
 		}
-		time.Sleep(10 * time.Millisecond)
+		r.clk.Advance(pollStep)
 	}
 }
 
-func phaseIs(p string) func(*state.Record) bool {
+// ticksFor runs the watcher for d of the engine's time, a poll at a time,
+// until stop (if not nil) says so; it reports whether stop did.
+func (r *rig) ticksFor(d time.Duration, stop func() bool) bool {
+	r.t.Helper()
+	for end := r.clk.Now().Add(d); r.clk.Now().Before(end); r.clk.Advance(pollStep) {
+		r.e.Tick(context.Background())
+		if stop != nil && stop() {
+			return true
+		}
+	}
+	return false
+}
+
+func phaseIs(p state.Phase) func(*state.Record) bool {
 	return func(r *state.Record) bool { return r.Phase == p }
 }
 

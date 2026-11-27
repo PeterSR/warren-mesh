@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/PeterSR/warren-mesh/internal/grammar"
 	"github.com/PeterSR/warren-mesh/internal/platform"
 )
 
@@ -28,8 +29,8 @@ const (
 	EnvUID = "WARREN_UID"
 )
 
-// MaxCallBody is the most one call's request or response may carry.
-const MaxCallBody = 1 << 20
+// MaxCallBody is the most one call's request or response may carry (1 MiB).
+const MaxCallBody = grammar.MaxCallBody
 
 // MaxAnswer is the most the client reads of one answer from Warren. A view
 // is the largest: up to 1000 entries of 3 KiB for each node of the mesh and
@@ -129,8 +130,13 @@ func Dial(path string, opts ...Option) (*Client, error) {
 // Path is the socket the client uses.
 func (c *Client) Path() string { return c.path }
 
-// Close drops idle connections. Requests in flight are not affected.
-func (c *Client) Close() { c.tr.CloseIdleConnections() }
+// Close drops idle connections. Requests in flight are not affected. It
+// always returns nil; it has the error result so that a Client is an
+// io.Closer.
+func (c *Client) Close() error {
+	c.tr.CloseIdleConnections()
+	return nil
+}
 
 // dial connects and, if a uid is required, checks who serves the socket.
 func (c *Client) dial(ctx context.Context, _, _ string) (net.Conn, error) {

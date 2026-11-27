@@ -75,7 +75,7 @@ func ExampleError() {
 	err := error(&client.Error{Code: client.CodeBusy, Detail: "the service's inflight places are full", Status: 429})
 	var e *client.Error
 	if errors.As(err, &e) {
-		fmt.Println(e.Code, e.Retryable(), e.Advice() == client.RetryWithBackoff)
+		fmt.Println(e.Code, e.Retryable(), e.Advice() == client.AdviceRetryWithBackoff)
 	}
 	fmt.Println(errors.Is(err, &client.Error{Code: client.CodeBusy}))
 	// Output:
