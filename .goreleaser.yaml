@@ -1,0 +1,125 @@
+# Release builds: binaries, archives, checksums, SBOMs and the GitHub release.
+# .github/workflows/release.yml runs this on a v* tag; RELEASING.md describes the process.
+version: 2
+
+project_name: warren
+
+builds:
+  - id: warren
+    main: ./cmd/warren
+    binary: warren
+    env:
+      - CGO_ENABLED=0
+    # Linux is the supported platform. darwin builds but is not supported, so it is not released.
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    mod_timestamp: "{{ .CommitTimestamp }}"
+  - id: warren-tailscale
+    main: ./cmd/warren-tailscale
+    binary: warren-tailscale
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    mod_timestamp: "{{ .CommitTimestamp }}"
+  - id: warren-update
+    main: ./cmd/warren-update
+    binary: warren-update
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    mod_timestamp: "{{ .CommitTimestamp }}"
+  - id: warren-release
+    main: ./cmd/warren-release
+    binary: warren-release
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: warren
+    ids: [warren, warren-tailscale, warren-update, warren-release]
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    # Every file in the archives carries the commit time, so a rebuild of the same commit gives
+    # the same archives.
+    builds_info:
+      mtime: "{{ .CommitDate }}"
+    files:
+      - src: LICENSE
+        info:
+          mtime: "{{ .CommitDate }}"
+      - src: README.md
+        info:
+          mtime: "{{ .CommitDate }}"
+      - src: THIRD_PARTY_NOTICES
+        info:
+          mtime: "{{ .CommitDate }}"
+      - src: examples/warren.yaml
+        info:
+          mtime: "{{ .CommitDate }}"
+      - src: examples/update.yaml
+        info:
+          mtime: "{{ .CommitDate }}"
+      - src: contrib/warren.service
+        info:
+          mtime: "{{ .CommitDate }}"
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+sboms:
+  - id: archives
+    artifacts: archive
+
+signs:
+  # Keyless, with the workflow's GitHub OIDC identity. The bundle holds the signature and the
+  # certificate; cosign verify-blob checks it (RELEASING.md).
+  - id: checksums
+    cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sigstore.json"
+    args:
+      - sign-blob
+      - --yes
+      - --bundle=${signature}
+      - ${artifact}
+    output: true
+
+release:
+  github:
+    owner: PeterSR
+    name: warren-mesh
+  # A tag such as v0.1.0-rc.1 makes a prerelease.
+  prerelease: auto
+  # A draft: the maintainer reads it and publishes it.
+  draft: true
+  use_existing_draft: true
+  replace_existing_artifacts: true
+  name_template: "v{{ .Version }}"
+
+# The notes come from CHANGELOG.md (scripts/changelog-section.sh), passed with --release-notes.
+# changelog.disable must stay unset: it also turns off reading that file.
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot.{{ .ShortCommit }}"

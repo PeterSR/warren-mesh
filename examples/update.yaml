@@ -1,0 +1,36 @@
+# A configuration for `warren-update run --config /etc/warren/update.yaml`.
+# Warren runs the updater as a service (see docs/updates.md); this file is the
+# updater's own, not Warren's. Every string value may use ${VAR}.
+
+# Where the updater keeps its state: one state.json per component, the
+# staging area and its own socket. Mode 0700, owned by the user it runs as.
+state_dir: /var/lib/warren/update
+
+warren:
+  # Warren's control socket (`control:` in Warren's config; by default
+  # control.sock next to services.dir). Required.
+  control: /run/warren/control.sock
+
+# How long a freshly installed version must stay healthy before it is
+# committed (default 15m, 2m for a dev component), and how long it has to
+# become healthy at all (default 5m).
+# canary: 15m
+# health_timeout: 5m
+
+components:
+  myapp:
+    # Minisign public keys, per channel. A stable component needs a stable key;
+    # a dev component needs a dev key and may omit the stable one. Make a pair
+    # with `warren-release keygen`, which prints this line.
+    keys: {dev: [RWTwOloQF1rIE8N1uRo/B40wTkdJptBQW53klcp52Vu3VUBeEJbauZbs]}
+    channel: dev
+    # The Warren service this component is the binary of: restarted and watched.
+    service: myapp
+    # Logical target -> absolute path. Optional: without it the one target is
+    # the component's name, at the path Warren reports for the service.
+    targets: {myapp: /opt/myapp/bin/myapp}
+    # The lease must be held, unchanged, this long after a start (5s to 5m).
+    settle: 30s
+    # The most any one file may be.
+    max_size: 256MiB
+    # pinned: managed by the package manager   # refuses install and revert

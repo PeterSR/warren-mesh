@@ -1,0 +1,35 @@
+# A systemd unit for the examples/warren.yaml configuration. Install the
+# binaries (warren and warren-tailscale together, in the same directory) under
+# /usr/local/bin and the config as /etc/warren/config.yaml, then:
+#
+#   systemctl daemon-reload
+#   systemctl enable --now warren
+#
+# `warren reload` (or SIGHUP) applies config changes without a restart.
+[Unit]
+Description=Warren node
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# warren-tailscale asks tailscaled's local API who the peers are, so this user
+# must be allowed to use it (for example `tailscale set --operator=warren`).
+User=warren
+Group=warren
+RuntimeDirectory=warren
+StateDirectory=warren
+ExecStart=/usr/local/bin/warren run --config /etc/warren/config.yaml
+ExecReload=/usr/local/bin/warren reload --config /etc/warren/config.yaml
+Restart=always
+RestartSec=2
+# Warren drains and stops its services on SIGTERM, within about 15 seconds.
+TimeoutStopSec=30
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,59 @@
+# A configuration for `warren run --config examples/warren.yaml`: one node
+# called "server" that reaches other nodes over Tailscale, runs one service,
+# and serves a directory for children.
+#
+# Every string value may use ${VAR} (an unset variable is an error) and
+# ${VAR:-default}; write a literal $ as $$.
+
+# The node's name: the first label of every relay id on this machine
+# (server, host.server, sandbox.server). Lower case letters, digits, dash and
+# underscore. Other nodes see this name, so it must be unique in the mesh.
+node: server
+
+# Optional. Say why this node's binaries are replaced from outside Warren (a
+# container image, a package manager). Warren only reports it; updaters refuse
+# to install and revert on a pinned node.
+# pinned: docker image example:warren
+
+# Where Warren keeps its small state (the reserved names it remembers).
+state_dir: /var/lib/warren
+
+# The transport: the process that carries calls to other nodes. "tailscale"
+# runs warren-tailscale, which is found next to the warren binary. Its
+# settings are the tailscale block.
+transport: tailscale
+tailscale:
+  tag: warren          # peers are the tailnet devices with this tag
+  listen: ":7778"      # where to listen; leave out to use the tailnet address
+  port: 7778           # the port the peers listen on
+  # socket: /var/run/tailscale/tailscaled.sock   # tailscaled's local API (this is the default)
+
+# Services on the node itself. Each is a socket in dir; the program behind it
+# is service <name> at the relay "server".
+services:
+  dir: /run/warren/services
+  list:
+    - name: chat
+      allow: ["*"]                       # who may call it: relay ids, "*.<node>", or "*"
+      namespaces: [web]                  # extra entry namespaces: name@web.server
+      run: [/usr/local/bin/chat-svc]     # Warren starts it and restarts it; omit for an external service
+      env_pass: [CHAT_TOKEN]             # variables it may inherit from Warren's environment
+
+# Children: directories under dir, for containers or other users on this
+# machine. A program that reaches a socket in a child's directory is that
+# service at that child.
+attach:
+  dir: /run/warren/attach
+  max_children: 16
+  children:
+    - name: host                         # relay id host.server
+      flat: true                         # its entries take the node's namespace: name@server
+      uid: 1000                          # the user that may use the directory
+      services:
+        - name: chat
+          allow: ["*"]
+  default:                               # any other directory made under dir, within a few seconds
+    max_entries: 100
+    services:
+      - name: chat
+        allow: ["*"]                     # an entry there is name@<directory>.server
