@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/PeterSR/warren-mesh/internal/daemon"
 )
 
 // TestDevBinary builds the binary and runs `warren dev` on the example
@@ -72,6 +74,17 @@ func TestDevBinary(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != 200 || !strings.Contains(string(body), `"relay"`) {
 		t.Errorf("self: %d %s", resp.StatusCode, body)
+	}
+	control := filepath.Join(dir, "laptop", "control.sock")
+	status, err := daemon.Control(control, "GET", "/status")
+	if err != nil || strings.Contains(string(status), "drain-exit-code") {
+		t.Errorf("dev status advertised a restart drain: %s (%v)", status, err)
+	}
+	if _, err := daemon.Control(control, "POST", "/drain-and-exit?code=75"); err == nil || !strings.Contains(err.Error(), "unknown query parameter") {
+		t.Errorf("dev restart drain should reject the unknown parameter: %v", err)
+	}
+	if _, err := daemon.Control(control, "POST", "/drain-and-exit"); err != nil {
+		t.Errorf("dev rejected the legacy drain request: %v", err)
 	}
 	cmd.Process.Signal(syscall.SIGTERM)
 	done := make(chan error, 1)

@@ -13,7 +13,8 @@ contract.
   of being ignored. A path that is no endpoint is 404, whatever its query.
 - Status codes: 200 (or 204 where there is no body), 400 unknown query parameter,
   404 not found (an unknown path, or a service that is not managed now), 405 wrong
-  method, 409 a reload that was refused (the body says why), 503 a restart
+  method, 409 a reload that was refused or an exit code that conflicts with
+  a pending shutdown, 503 a service restart
   while Warren is shutting down or draining to exit.
 - An older Warren answers 404 to the endpoints it does not have. A caller that
   needs one treats that as "Warren too old".
@@ -34,7 +35,11 @@ children, services and processes, and `healthy` (the config is loaded and the
 transport link is up). `pinned` is present, with its reason, when the config sets
 `pinned:` (this node's binaries are replaced from outside Warren, and updaters
 stay away). `warren.updatable` and `warren.not_updatable` say whether Warren's own
-binary could be replaced, as described below for services.
+binary could be replaced, as described below for services. When available,
+`warren.exe` is the absolute executable path resolved at startup.
+On Linux, `warren.exe_dev` and `warren.exe_ino` identify the running executable
+even if a replacement is now at that path. Both fields are omitted when the
+running image cannot be identified.
 
 ## Services
 
@@ -101,3 +106,14 @@ requested restart is never delayed by an earlier crash loop. It answers at once:
 this service with a `start_seq` of that number or higher begins after the request.
 A start that was already in progress has a lower number, and is stopped and
 replaced. A request is never lost, whatever the service was doing.
+
+## `POST /drain-and-exit`
+
+In `warren run`, Warren answers 204, stops handing out calls, waits for answers,
+then shuts down normally. With no query, Warren exits with status 0. When
+`warren.features` in `GET /status` includes `drain-exit-code`, a caller can
+send `?code=75` to request exit status 75 as a restart hint for a launcher.
+Other query parameters, duplicate values and other exit codes return 400.
+The first shutdown request fixes the exit code. Repeating it returns 204
+while the control socket is open. Requesting a different code returns 409.
+Development mode rejects restart drains and exits on a signal as usual.
