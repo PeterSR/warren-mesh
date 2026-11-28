@@ -1,0 +1,32 @@
+# Install this file as ~/.config/systemd/user/warren.service.
+# Put warren-launch, warren and warren-tailscale together in ~/.local/bin
+# and adapt ~/.config/warren/config.yaml for your user. For example:
+#
+#   state_dir: ${HOME}/.local/state/warren
+#   services.dir: ${XDG_RUNTIME_DIR}/warren/services
+#   attach.dir: ${XDG_RUNTIME_DIR}/warren/attach
+#
+# Set dir inside the services and attach YAML blocks. The unit creates the
+# runtime directory and Warren derives ${XDG_RUNTIME_DIR}/warren/control.sock
+# from services.dir when control is unset. Set the sample host child UID to
+# your UID or omit that child. Your user needs access to tailscaled if using
+# the Tailscale transport. Then run:
+#
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now warren
+[Unit]
+Description=Warren node
+
+[Service]
+Type=simple
+RuntimeDirectory=warren
+RuntimeDirectoryMode=0700
+ExecStart=%h/.local/bin/warren-launch --config %h/.config/warren/config.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2
+KillMode=mixed
+TimeoutStopSec=60s
+
+[Install]
+WantedBy=default.target

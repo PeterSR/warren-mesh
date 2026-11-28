@@ -65,15 +65,17 @@ You need Go 1.26 or newer.
 
 ```
 go install github.com/PeterSR/warren-mesh/cmd/warren@latest
+go install github.com/PeterSR/warren-mesh/cmd/warren-launch@latest
 go install github.com/PeterSR/warren-mesh/cmd/warren-tailscale@latest
 go install github.com/PeterSR/warren-mesh/cmd/warren-update@latest
 go install github.com/PeterSR/warren-mesh/cmd/warren-release@latest
 ```
 
 They go in the same directory (`$(go env GOBIN)`, or `$(go env GOPATH)/bin`).
-Keep them together: `transport: tailscale` runs `warren-tailscale` from next
-to the `warren` binary. Release archives for Linux (amd64 and arm64) are on
-the releases page; [RELEASING.md](RELEASING.md) says how to verify them.
+Keep `warren-launch`, `warren` and `warren-tailscale` together. By default,
+the launcher finds Warren next to itself, and Warren finds the Tailscale
+transport next to itself. Release archives for Linux (amd64 and arm64) are
+on the releases page. [RELEASING.md](RELEASING.md) explains verification.
 Third-party licenses are in [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES).
 
 ## Quick start
@@ -93,8 +95,29 @@ service, publish an entry, receive a call from a child and answer it.
 
 To run a real node, copy [examples/warren.yaml](examples/warren.yaml) to
 `/etc/warren/config.yaml`, set `node:` and the Tailscale `tag:`, and use
-`warren run`; [contrib/warren.service](contrib/warren.service) is a systemd
-unit for it.
+`warren run` to run it directly or use the [direct-run system unit](contrib/warren.service).
+To run it with the launcher, install the [launcher system unit](contrib/warren-launch.service)
+or the [launcher user unit](contrib/warren-user.service). For the user unit,
+set `state_dir` to a private writable directory. Set `services.dir` and
+`attach.dir` to `${XDG_RUNTIME_DIR}/warren/services` and
+`${XDG_RUNTIME_DIR}/warren/attach`. The unit creates the runtime directory,
+and Warren defaults the control socket to `${XDG_RUNTIME_DIR}/warren/control.sock`.
+
+The launcher runs Warren in its own process session. Start it as a dedicated
+child of a service manager or supervisor. On Linux it refuses PID 1 and
+inherited child processes, and requires `/proc` mounted in its own PID
+namespace with `NSpid` in `/proc/self/status`. It cleans up adopted descendants
+before a restart. If a descendant survives the cleanup deadline, the launcher
+logs its PID and process state when available and continues.
+
+A clean exit stops the launcher. Exit 75 requests a restart after one second
+and resets the crash backoff. Other failures restart with a delay that doubles
+from one second to one minute and
+resets after five minutes of uptime. SIGHUP reloads Warren. SIGTERM and
+SIGINT stop Warren and end the launcher with Warren's exit status. The
+launcher gives Warren 30 seconds to stop before sending SIGKILL. Give the
+launcher 60 seconds in your service manager to allow for descendant
+cleanup. Replace `warren-launch` by hand when upgrading it.
 
 ## Commands
 
@@ -115,6 +138,9 @@ warren dev --config dev.yaml [--dir path] [-v]
     service sockets, for testing services. -v logs what the nodes do.
 warren version
     Print the version.
+
+warren-launch --config path [--warren path]
+    Supervise Warren. Defaults to the warren binary next to the launcher.
 
 warren-tailscale
     The tailnet transport. Started by Warren (`transport: tailscale`) on
