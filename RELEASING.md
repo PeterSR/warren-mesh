@@ -5,9 +5,10 @@ which first runs the checks of `test.yml` on the tagged commit and publishes not
 It then builds with goreleaser ([.goreleaser.yaml](.goreleaser.yaml)) and creates a **draft** GitHub
 release with:
 
-- archives for Linux on amd64 and arm64, each with `warren`, `warren-tailscale`, `warren-update`,
-  `warren-release`, `LICENSE`, `README.md`, `THIRD_PARTY_NOTICES`, `examples/warren.yaml`,
-  `examples/update.yaml` and `contrib/warren.service`;
+- archives for Linux on amd64 and arm64, each with `warren`, `warren-launch`, `warren-tailscale`,
+  `warren-update`, `warren-release`, `LICENSE`, `README.md`, `THIRD_PARTY_NOTICES`,
+  `examples/warren.yaml`, `examples/update.yaml`, `contrib/warren.service`,
+  `contrib/warren-launch.service` and `contrib/warren-user.service`;
 - an SPDX SBOM for each archive;
 - `checksums.txt`, signed with cosign keyless (`checksums.txt.sigstore.json`);
 - notes taken from the version's `CHANGELOG.md` section;

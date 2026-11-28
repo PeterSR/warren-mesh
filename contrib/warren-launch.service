@@ -1,0 +1,41 @@
+# A systemd unit for the examples/warren.yaml configuration. Install the
+# binaries (warren-launch, warren and warren-tailscale together) under
+# /usr/local/bin, this file as /etc/systemd/system/warren.service and the
+# config as /etc/warren/config.yaml. Create the warren system user and group
+# before enabling the unit. Then run:
+#
+#   systemctl daemon-reload
+#   systemctl enable --now warren
+#
+# If replacing a running direct-run unit, run systemctl restart warren
+# after daemon-reload to activate the launcher.
+#
+# `warren reload` (or SIGHUP) applies config changes without a restart.
+[Unit]
+Description=Warren node
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# warren-tailscale asks tailscaled's local API who the peers are, so this user
+# must be allowed to use it (for example `tailscale set --operator=warren`).
+User=warren
+Group=warren
+RuntimeDirectory=warren
+StateDirectory=warren
+ExecStart=/usr/local/bin/warren-launch --config /etc/warren/config.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2
+# Give the launcher time to stop Warren and reap its descendants.
+KillMode=mixed
+TimeoutStopSec=60s
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

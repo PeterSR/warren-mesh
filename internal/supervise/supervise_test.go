@@ -645,7 +645,7 @@ func TestExeFollowsTheFileBetweenStarts(t *testing.T) {
 	fast(t)
 	a, b := t.TempDir(), t.TempDir()
 	for _, d := range []string{a, b} {
-		os.WriteFile(filepath.Join(d, "tool"), []byte("#!/bin/sh\nsleep 30\n"), 0o755)
+		os.WriteFile(filepath.Join(d, "tool"), []byte("#!/bin/sh\nexec /bin/sleep 30\n"), 0o755)
 	}
 	t.Setenv("PATH", a)
 	s := New(quiet())

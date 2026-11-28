@@ -18,6 +18,18 @@ builds:
     ldflags:
       - -s -w
     mod_timestamp: "{{ .CommitTimestamp }}"
+  - id: warren-launch
+    main: ./cmd/warren-launch
+    binary: warren-launch
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    mod_timestamp: "{{ .CommitTimestamp }}"
   - id: warren-tailscale
     main: ./cmd/warren-tailscale
     binary: warren-tailscale
@@ -57,7 +69,7 @@ builds:
 
 archives:
   - id: warren
-    ids: [warren, warren-tailscale, warren-update, warren-release]
+    ids: [warren, warren-launch, warren-tailscale, warren-update, warren-release]
     formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     # Every file in the archives carries the commit time, so a rebuild of the same commit gives
@@ -81,6 +93,12 @@ archives:
         info:
           mtime: "{{ .CommitDate }}"
       - src: contrib/warren.service
+        info:
+          mtime: "{{ .CommitDate }}"
+      - src: contrib/warren-launch.service
+        info:
+          mtime: "{{ .CommitDate }}"
+      - src: contrib/warren-user.service
         info:
           mtime: "{{ .CommitDate }}"
 

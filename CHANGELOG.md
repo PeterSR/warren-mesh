@@ -40,7 +40,9 @@ Initial release.
   `keygen`, `publish` and `verify`, with minisign signatures that the stock `minisign -V`
   verifies. Their dependencies are `aead.dev/minisign`, `golang.org/x/crypto` and
   `golang.org/x/term`.
-- The release archives hold `warren`, `warren-tailscale`, `warren-update`, `warren-release`
-  and `examples/update.yaml`, besides the examples and the unit file.
+- `warren-launch` supervises Warren, restarts it with backoff and cleans up its descendants
+  on Linux.
+- The release archives hold `warren`, `warren-launch`, `warren-tailscale`, `warren-update`,
+  `warren-release`, config examples and systemd units for system and user services.
 - The packages `confload` (strict YAML with `${VAR}` expansion and secrets), `client` and
   `warrentest`.
