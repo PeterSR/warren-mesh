@@ -68,11 +68,11 @@ func run(args []string, out, errw io.Writer) int {
 			return 1
 		}
 		log := slog.New(slog.NewTextHandler(errw, nil))
-		if err := daemon.Run(context.Background(), daemon.Options{ConfigPath: *cfgPath, Log: log}); err != nil {
+		code, err := daemon.Run(context.Background(), daemon.Options{ConfigPath: *cfgPath, Log: log})
+		if err != nil {
 			fmt.Fprintln(errw, "warren:", err)
-			return 1
 		}
-		return 0
+		return code
 	case "status", "reload", "drain-and-exit":
 		if err := fs.Parse(rest); err != nil {
 			return 2

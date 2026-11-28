@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"sync"
@@ -33,6 +34,9 @@ import (
 
 // HelloTimeout is how long startup waits for the transport to answer hello.
 var HelloTimeout = 3 * time.Second
+
+// RestartExitCode tells the launcher to start Warren again after a clean drain.
+const RestartExitCode = 75
 
 // Options start a daemon.
 type Options struct {
@@ -54,6 +58,9 @@ type Options struct {
 	// Context, if set, ends startup early: when it is done, Start stops what
 	// it started and returns the context's error.
 	Context context.Context
+
+	// restartDrain is enabled when Run can return the requested exit code.
+	restartDrain bool
 }
 
 // Daemon is a running Warren.
@@ -76,6 +83,8 @@ type Daemon struct {
 	managed   map[string]config.Service // services we run, as started
 	exit      chan struct{}             // closed by drain-and-exit
 	exitOnce  sync.Once
+	exitCode  int // published by closing exit
+	exePath   string
 	lockFile  *os.File
 	stopCh    chan struct{}
 	stopOnce  sync.Once
@@ -102,6 +111,9 @@ func Start(o Options) (*Daemon, error) {
 		return nil, err
 	}
 	d := &Daemon{o: o, log: o.Log, cfg: cfg, sup: supervise.New(o.Log), managed: map[string]config.Service{}, exit: make(chan struct{}), stopCh: make(chan struct{})}
+	if exe, err := d.executable(); err == nil && filepath.IsAbs(exe) {
+		d.exePath, _ = filepath.EvalSymlinks(exe)
+	}
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		return nil, fmt.Errorf("state_dir: %w", err)
 	}
@@ -243,12 +255,13 @@ func (d *Daemon) Stop() {
 	d.sup.StopAll()
 }
 
-// Run starts Warren, reloads on SIGHUP, and stops on ctx end or SIGTERM/SIGINT.
+// Run starts Warren, reloads on SIGHUP, and returns the process exit code
+// after a drain, context cancellation, or SIGTERM/SIGINT.
 //
 // The signals are taken before Start, which can take seconds (it waits for
 // the transport): a SIGHUP then waits until Start has returned, and a SIGTERM
 // ends the startup and shuts down cleanly instead of killing the process.
-func Run(ctx context.Context, o Options) error {
+func Run(ctx context.Context, o Options) (int, error) {
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 	// Once the first stop signal has come, the default handling is back, so a
@@ -258,13 +271,15 @@ func Run(ctx context.Context, o Options) error {
 	signal.Notify(hup, syscall.SIGHUP)
 	defer signal.Stop(hup)
 	o.Context = ctx
+	o.restartDrain = true
 	d, err := Start(o)
 	if err != nil {
 		if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
-			return nil // asked to stop while starting: stopped cleanly
+			return 0, nil // asked to stop while starting: stopped cleanly
 		}
-		return err
+		return 1, err
 	}
+	defer d.Stop()
 	for {
 		select {
 		case <-hup:
@@ -272,13 +287,21 @@ func Run(ctx context.Context, o Options) error {
 				d.log.Error("reload refused", "err", err)
 			}
 		case <-d.exit:
-			d.Stop()
-			return nil
+			return d.exitCode, nil
 		case <-ctx.Done():
-			d.Stop()
-			return nil
+			return d.requestExit(0), nil
 		}
 	}
+}
+
+// requestExit fixes the exit code before waking Run. Subsequent requests see
+// that same code, including when a signal races with a control request.
+func (d *Daemon) requestExit(code int) int {
+	d.exitOnce.Do(func() {
+		d.exitCode = code
+		close(d.exit)
+	})
+	return d.exitCode
 }
 
 // Reload reads the config again and applies it. Secrets that are files are
@@ -489,6 +512,15 @@ func (d *Daemon) Status() map[string]any {
 		st["pinned"] = cfg.Pinned
 	}
 	if w, ok := st["warren"].(map[string]any); ok {
+		if d.o.restartDrain {
+			w["features"] = append(slices.Clone(service.Features), "drain-exit-code")
+		}
+		if d.exePath != "" {
+			w["exe"] = d.exePath
+		}
+		if dev, ino, ok := platform.ExecutableIdentity(); ok {
+			w["exe_dev"], w["exe_ino"] = dev, ino
+		}
 		if exe, err := d.executable(); err == nil {
 			if updatable, reason, known := d.updatableEnv().Check(exe); known {
 				w["updatable"] = updatable
@@ -590,15 +622,13 @@ func writeJSON(w http.ResponseWriter, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// noQuery answers 400 to any query parameter on a route that exists: no
-// control endpoint has one yet, so a caller that asks for something an older
-// Warren does not know is refused instead of silently ignored. A path that is
-// no route at all is left to the mux, which answers 404 (or 405 for another
-// method).
-func noQuery(mux *http.ServeMux) http.Handler {
+// noQuery answers 400 to any query parameter on a route that exists, except
+// the route that validates its own query. The mux handles unknown routes and
+// wrong methods.
+func noQuery(mux *http.ServeMux, queryRoute string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.RawQuery != "" {
-			if _, pattern := mux.Handler(r); pattern != "" {
+			if _, pattern := mux.Handler(r); pattern != "" && pattern != queryRoute {
 				name := r.URL.RawQuery
 				if q, err := url.ParseQuery(r.URL.RawQuery); err == nil {
 					for k := range q {
@@ -662,8 +692,22 @@ func (d *Daemon) controlHandler() http.Handler {
 		}
 		writeJSON(w, map[string]any{"accepted": true, "min_start_seq": minSeq})
 	})
-	mux.HandleFunc("POST /drain-and-exit", func(w http.ResponseWriter, r *http.Request) {
-		d.exitOnce.Do(func() { close(d.exit) })
+	const drainRoute = "POST /drain-and-exit"
+	mux.HandleFunc(drainRoute, func(w http.ResponseWriter, r *http.Request) {
+		code := 0
+		if r.URL.RawQuery != "" {
+			q, err := url.ParseQuery(r.URL.RawQuery)
+			values := q["code"]
+			if err != nil || len(q) != 1 || len(values) != 1 || values[0] != strconv.Itoa(RestartExitCode) {
+				http.Error(w, "expected a single code=75 query parameter", http.StatusBadRequest)
+				return
+			}
+			code = RestartExitCode
+		}
+		if d.requestExit(code) != code {
+			http.Error(w, "a different exit code is already set", http.StatusConflict)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("POST /reload", func(w http.ResponseWriter, r *http.Request) {
@@ -673,7 +717,10 @@ func (d *Daemon) controlHandler() http.Handler {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
-	return noQuery(mux)
+	if d.o.restartDrain {
+		return noQuery(mux, drainRoute)
+	}
+	return noQuery(mux, "")
 }
 
 // ---- control client (warren status, warren reload) ----

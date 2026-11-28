@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -487,7 +488,13 @@ func TestRunStopsOnContextAndReloadsOnSIGHUP(t *testing.T) {
 	os.WriteFile(path, []byte(text), 0o600)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- Run(ctx, Options{ConfigPath: path, Log: quiet()}) }()
+	go func() {
+		code, err := Run(ctx, Options{ConfigPath: path, Log: quiet()})
+		if code != 0 {
+			t.Errorf("exit code %d, want 0", code)
+		}
+		done <- err
+	}()
 	cfg, _ := config.Load(path)
 	ctl := ControlPath(cfg)
 	eventually(t, "control socket", func() bool { _, err := Control(ctl, "GET", "/status"); return err == nil })
@@ -514,35 +521,90 @@ func TestRunStopsOnContextAndReloadsOnSIGHUP(t *testing.T) {
 }
 
 func TestDrainAndExitAndHealth(t *testing.T) {
-	fast(t)
-	dir := short(t)
-	os.MkdirAll(filepath.Join(dir, "a", "host"), 0o755)
-	path := filepath.Join(dir, "warren.yaml")
-	os.WriteFile(path, []byte(cfgText(dir, "", "")), 0o600)
-	done := make(chan error, 1)
-	go func() { done <- Run(context.Background(), Options{ConfigPath: path, Log: quiet()}) }()
-	cfg, _ := config.Load(path)
-	ctl := ControlPath(cfg)
-	if ctl != filepath.Join(dir, "control.sock") {
-		t.Errorf("control default %s", ctl)
+	for _, tc := range []struct {
+		name  string
+		query string
+		code  int
+	}{
+		{name: "stop"},
+		{name: "restart", query: "?code=75", code: 75},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fast(t)
+			dir := short(t)
+			os.MkdirAll(filepath.Join(dir, "a", "host"), 0o755)
+			path := filepath.Join(dir, "warren.yaml")
+			os.WriteFile(path, []byte(cfgText(dir, "", "")), 0o600)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan int, 1)
+			go func() {
+				code, err := Run(ctx, Options{ConfigPath: path, Log: quiet()})
+				if err != nil {
+					t.Error(err)
+				}
+				done <- code
+			}()
+			cfg, _ := config.Load(path)
+			ctl := ControlPath(cfg)
+			if ctl != filepath.Join(dir, "control.sock") {
+				t.Errorf("control default %s", ctl)
+			}
+			eventually(t, "control socket", func() bool { _, err := Control(ctl, "GET", "/status"); return err == nil })
+			b, _ := Control(ctl, "GET", "/status")
+			var st map[string]any
+			if err := json.Unmarshal(b, &st); err != nil || st["healthy"] != true {
+				t.Errorf("not healthy: %s", b)
+			}
+			if _, err := Control(ctl, "POST", "/drain-and-exit"+tc.query); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case code := <-done:
+				if code != tc.code {
+					t.Errorf("exit code %d, want %d", code, tc.code)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("did not exit")
+			}
+		})
 	}
-	eventually(t, "control socket", func() bool { _, err := Control(ctl, "GET", "/status"); return err == nil })
-	b, _ := Control(ctl, "GET", "/status")
-	var st map[string]any
-	json.Unmarshal(b, &st)
-	if st["healthy"] != true {
-		t.Errorf("not healthy: %s", b)
-	}
-	if _, err := Control(ctl, "POST", "/drain-and-exit"); err != nil {
+}
+
+func TestDrainAndExitKeepsFirstAcceptedCode(t *testing.T) {
+	h, err := start(t, "", "", func(o *Options) { o.restartDrain = true })
+	if err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatal(err)
+	for _, query := range []string{"?code=0", "?code=1", "?code=075", "?code=75&code=75", "?code=75&x=1", "?code", "?=75", "?code=75;"} {
+		if code, b := ctlDo(t, h, "POST", "/drain-and-exit"+query); code != http.StatusBadRequest {
+			t.Errorf("%s: %d %s", query, code, b)
 		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("did not exit")
+	}
+	select {
+	case <-h.d.exit:
+		t.Fatal("an invalid request started a drain")
+	default:
+	}
+	for _, tc := range []struct {
+		query string
+		code  int
+	}{
+		{query: "?code=75", code: http.StatusNoContent},
+		{code: http.StatusConflict},
+		{query: "?code=75", code: http.StatusNoContent},
+	} {
+		if code, b := ctlDo(t, h, "POST", "/drain-and-exit"+tc.query); code != tc.code {
+			t.Errorf("%s: %d %s, want %d", tc.query, code, b, tc.code)
+		}
+	}
+	select {
+	case <-h.d.exit:
+	default:
+		t.Fatal("the accepted request did not start a drain")
+	}
+	if h.d.exitCode != RestartExitCode {
+		t.Errorf("exit code %d, want %d", h.d.exitCode, RestartExitCode)
 	}
 }
 
@@ -749,7 +811,13 @@ func TestSignalDuringStartupStopsCleanly(t *testing.T) {
 	os.WriteFile(path, []byte(cfgText(dir, "transport: {run: [/bin/sleep, \"30\"]}", "")), 0o600)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- Run(ctx, Options{ConfigPath: path, Log: quiet()}) }()
+	go func() {
+		code, err := Run(ctx, Options{ConfigPath: path, Log: quiet()})
+		if code != 0 {
+			t.Errorf("exit code %d, want 0", code)
+		}
+		done <- err
+	}()
 	time.Sleep(500 * time.Millisecond) // Start is now waiting for the hello
 	cancel()
 	select {
@@ -774,12 +842,16 @@ func TestSIGHUPDuringStartupDoesNotKill(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- Run(ctx, Options{ConfigPath: path, Log: quiet(), Load: func() (*config.Config, error) {
+		code, err := Run(ctx, Options{ConfigPath: path, Log: quiet(), Load: func() (*config.Config, error) {
 			if first.CompareAndSwap(false, true) {
 				time.Sleep(500 * time.Millisecond) // startup is slow
 			}
 			return config.Load(path)
 		}})
+		if code != 0 {
+			t.Errorf("exit code %d, want 0", code)
+		}
+		done <- err
 	}()
 	time.Sleep(150 * time.Millisecond)
 	syscall.Kill(os.Getpid(), syscall.SIGHUP) // would terminate the process before the fix
@@ -854,7 +926,7 @@ func TestControlRefusesUnknownQueryParameters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, c := range [][2]string{{"GET", "/status?x=1"}, {"GET", "/services?code=75"}, {"GET", "/services/echo?a"}, {"POST", "/services/echo/restart?x=1"}, {"POST", "/drain-and-exit?code=75"}, {"POST", "/reload?x=1"}} {
+	for _, c := range [][2]string{{"GET", "/status?x=1"}, {"GET", "/services?code=75"}, {"GET", "/services/echo?a"}, {"POST", "/services/echo/restart?x=1"}, {"POST", "/reload?x=1"}} {
 		if code, b := ctlDo(t, h, c[0], c[1]); code != 400 || !strings.Contains(string(b), "unknown query parameter") {
 			t.Errorf("%s %s: %d %s", c[0], c[1], code, b)
 		}
@@ -908,6 +980,56 @@ func TestControlCountersAndEpochSurviveAReloadThatReAddsTheService(t *testing.T)
 	after, _ := getService(t, h, "echo")
 	if after.StartSeq != before.StartSeq+1 || after.Starts != before.Starts+1 || after.Exits != 1 || after.RequestedExits != 1 || after.Boot != before.Boot {
 		t.Errorf("before %+v after %+v", before, after)
+	}
+}
+
+func TestControlStatusReportsRunningExecutable(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(t.TempDir(), "warren")
+	if err := os.Symlink(exe, alias); err != nil {
+		t.Fatal(err)
+	}
+	h, err := start(t, "", "", func(o *Options) {
+		o.Executable = func() (string, error) { return alias, nil }
+		o.restartDrain = true
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(alias); err != nil {
+		t.Fatal(err)
+	}
+	code, b := ctlDo(t, h, "GET", "/status")
+	var st struct {
+		Warren struct {
+			Features []string
+			Exe      string
+			Dev      *uint64 `json:"exe_dev"`
+			Ino      *uint64 `json:"exe_ino"`
+		}
+	}
+	if err := json.Unmarshal(b, &st); code != http.StatusOK || err != nil {
+		t.Fatalf("status: %d %s: %v", code, b, err)
+	}
+	if st.Warren.Exe != resolved || !slices.Contains(st.Warren.Features, "drain-exit-code") {
+		t.Errorf("running executable or feature missing: %s", b)
+	}
+	if dev, ino, ok := platform.ExecutableIdentity(); ok {
+		if st.Warren.Dev == nil || st.Warren.Ino == nil || *st.Warren.Dev != dev || *st.Warren.Ino != ino {
+			t.Errorf("running executable identity missing or wrong: %s", b)
+		}
+	} else if st.Warren.Dev != nil || st.Warren.Ino != nil {
+		t.Errorf("unavailable executable identity was reported: %s", b)
+	}
+	if slices.Contains(h.d.Node().Status()["warren"].(map[string]any)["features"].([]string), "drain-exit-code") {
+		t.Error("the control feature leaked into the service status")
 	}
 }
 
